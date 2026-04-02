@@ -12,6 +12,7 @@ type OpportunityBucket = 'second-page' | 'below-second-page' | 'other'
 type CannibalizationRisk = 'none' | 'medium' | 'high'
 type Intent = 'commercial' | 'informational' | 'navigational' | 'mixed'
 type PageType = 'service' | 'blog' | 'category' | 'homepage' | 'general'
+type RecentOptimizationMode = 'exclude' | 'deprioritize'
 
 type Finding = {
   id: string
@@ -42,6 +43,7 @@ type Opportunity = {
   inferredPageType: PageType
   cannibalizationRisk: CannibalizationRisk
   competingUrlCount: number
+  recentlyOptimized: boolean
 }
 
 type AnalysisReport = {
@@ -87,6 +89,58 @@ type PageScanResponse = {
   }
 }
 
+type ToolId = 'onpage' | 'eeat'
+
+type EeatCategory = {
+  id: string
+  label: string
+  earned: number
+  max: number
+  summary: string
+  findings: string[]
+  gaps: string[]
+  recommendation: string
+}
+
+type EeatScanResponse = {
+  url: string
+  title: string
+  analysis: {
+    score: number
+    summary: string
+    formula: {
+      earnedPoints: number
+      totalPoints: number
+      explanation: string
+      categories: Array<{
+        id: string
+        label: string
+        earned: number
+        max: number
+      }>
+    }
+    strengths: string[]
+    priorities: string[]
+    visualSummary: {
+      meaningfulImageCount: number
+      decorativeImageCount: number
+      videoCount: number
+      screenshotLikeImages: number
+    }
+    categories: EeatCategory[]
+    firstWords: string
+    title: string
+    metaDescription: string
+    pageSignals: {
+      wordCount: number
+      headingCount: number
+      trustLinkCount: number
+      outboundLinkCount: number
+      authoritativeOutboundLinkCount: number
+    }
+  }
+}
+
 type BulkScanResult = PageScanResponse & {
   opportunityId: string
 }
@@ -101,6 +155,14 @@ type AnalysisSettings = {
   competitorTerms: string
   excludeBrandTerms: boolean
   deprioritizeCompetitors: boolean
+  recentOptimizationMode: RecentOptimizationMode
+  recentOptimizationWindowDays: number
+}
+
+type UsedOpportunityLookup = {
+  keys: Set<string>
+  datedKeys: Map<string, number>
+  hasDateColumn: boolean
 }
 
 type FieldKey =
@@ -111,6 +173,7 @@ type FieldKey =
   | 'keywordDifficulty'
   | 'traffic'
   | 'relevance'
+  | 'lastOptimized'
 
 type BaseCandidate = {
   url: string
@@ -134,6 +197,8 @@ const defaultSettings: AnalysisSettings = {
   competitorTerms: '',
   excludeBrandTerms: true,
   deprioritizeCompetitors: true,
+  recentOptimizationMode: 'exclude',
+  recentOptimizationWindowDays: 120,
 }
 
 const fieldLabels: Record<FieldKey, string> = {
@@ -144,6 +209,7 @@ const fieldLabels: Record<FieldKey, string> = {
   keywordDifficulty: 'Keyword difficulty',
   traffic: 'Traffic',
   relevance: 'Relevance',
+  lastOptimized: 'Last optimized',
 }
 
 const fieldAliases: Record<FieldKey, string[]> = {
@@ -154,6 +220,7 @@ const fieldAliases: Record<FieldKey, string[]> = {
   keywordDifficulty: ['keyword difficulty', 'difficulty', 'kd', 'seo difficulty'],
   traffic: ['traffic', 'estimated traffic', 'organic traffic', 'monthly traffic', 'est traffic'],
   relevance: ['relevance', 'relevant', 'page relevance', 'match', 'alignment', 'intent match'],
+  lastOptimized: ['last optimized', 'optimized date', 'date optimized', 'last updated', 'completed date', 'published date', 'date'],
 }
 
 const overrideOptions: Array<{ value: OverrideChoice; label: string }> = [
@@ -165,21 +232,40 @@ const overrideOptions: Array<{ value: OverrideChoice; label: string }> = [
 ]
 
 function App() {
+  const [activeTool, setActiveTool] = useState<ToolId>('onpage')
   const [currentView, setCurrentView] = useState<'dashboard' | 'opportunities'>('dashboard')
   const [settings, setSettings] = useState<AnalysisSettings>(defaultSettings)
-  const [report, setReport] = useState<AnalysisReport | null>(null)
+  const [uploadedRows, setUploadedRows] = useState<RowRecord[]>([])
   const [fileName, setFileName] = useState('')
   const [isProcessingFile, setIsProcessingFile] = useState(false)
+  const [usedOpportunityFileName, setUsedOpportunityFileName] = useState('')
+  const [usedOpportunityLookup, setUsedOpportunityLookup] = useState<UsedOpportunityLookup>({
+    keys: new Set(),
+    datedKeys: new Map(),
+    hasDateColumn: false,
+  })
+  const [isProcessingUsedFile, setIsProcessingUsedFile] = useState(false)
   const [scanUrl, setScanUrl] = useState('')
   const [scanKeyword, setScanKeyword] = useState('')
   const [scanResult, setScanResult] = useState<PageScanResponse | null>(null)
   const [scanError, setScanError] = useState('')
   const [isScanningPage, setIsScanningPage] = useState(false)
+  const [eeatUrl, setEeatUrl] = useState('')
+  const [eeatResult, setEeatResult] = useState<EeatScanResponse | null>(null)
+  const [eeatError, setEeatError] = useState('')
+  const [isScanningEeat, setIsScanningEeat] = useState(false)
   const [isBulkScanning, setIsBulkScanning] = useState(false)
   const [scanOverride, setScanOverride] = useState<OverrideChoice>('auto')
   const [opportunityOverrides, setOpportunityOverrides] = useState<Record<string, OverrideChoice>>({})
   const [reviewStatuses, setReviewStatuses] = useState<Record<string, ReviewStatus>>({})
   const [bulkScanResults, setBulkScanResults] = useState<Record<string, BulkScanResult>>({})
+  const report = useMemo(() => {
+    if (!fileName || uploadedRows.length === 0) {
+      return null
+    }
+
+    return analyzeSheet(fileName, uploadedRows, settings, '', usedOpportunityLookup)
+  }, [fileName, settings, uploadedRows, usedOpportunityLookup])
 
   const displayedOpportunities = useMemo(() => {
     if (!report) {
@@ -227,10 +313,32 @@ function App() {
       setOpportunityOverrides({})
       setReviewStatuses({})
       setBulkScanResults({})
-      setReport(analyzeSheet(file.name, rows, settings, ''))
+      setUploadedRows(rows)
       setCurrentView('dashboard')
     } finally {
       setIsProcessingFile(false)
+      event.target.value = ''
+    }
+  }
+
+  const handleUsedOpportunitiesChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    setIsProcessingUsedFile(true)
+    setUsedOpportunityFileName(file.name)
+
+    try {
+      const buffer = await file.arrayBuffer()
+      const workbook = XLSX.read(buffer, { type: 'array' })
+      const firstSheetName = workbook.SheetNames[0]
+      const firstSheet = workbook.Sheets[firstSheetName]
+      const rows = XLSX.utils.sheet_to_json<RowRecord>(firstSheet, { defval: '' })
+      setUsedOpportunityLookup(buildUsedOpportunityLookup(rows))
+    } finally {
+      setIsProcessingUsedFile(false)
       event.target.value = ''
     }
   }
@@ -266,6 +374,39 @@ function App() {
       setScanError(error instanceof Error ? error.message : 'Page scan failed.')
     } finally {
       setIsScanningPage(false)
+    }
+  }
+
+  const runEeatScan = async (targetUrl: string) => {
+    if (!targetUrl.trim()) {
+      setEeatError('Add a URL for the EEAT scan.')
+      setEeatResult(null)
+      return
+    }
+
+    setIsScanningEeat(true)
+    setEeatError('')
+    setEeatUrl(targetUrl)
+
+    try {
+      const params = new URLSearchParams({ url: targetUrl.trim() })
+      const response = await fetch(`/api/eeat-scan?${params.toString()}`)
+      const contentType = response.headers.get('content-type') ?? ''
+      const rawBody = await response.text()
+      const data = contentType.includes('application/json')
+        ? JSON.parse(rawBody)
+        : { error: 'The EEAT scan backend did not return JSON. Restart the dev server so the new backend route loads.' }
+
+      if (!response.ok) {
+        throw new Error(data.error ?? 'EEAT scan failed.')
+      }
+
+      setEeatResult(data as EeatScanResponse)
+    } catch (error) {
+      setEeatResult(null)
+      setEeatError(error instanceof Error ? error.message : 'EEAT scan failed.')
+    } finally {
+      setIsScanningEeat(false)
     }
   }
 
@@ -308,30 +449,62 @@ function App() {
   const scanOverrideMeta = getOverrideMeta(scanOverride)
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
+    <main className="app-shell app-layout">
+      <aside className="tool-sidebar panel">
         <div>
           <p className="eyebrow">SEO Opportunity Finder</p>
-          <h1 className="topbar-title">
-            {currentView === 'dashboard' ? 'Main dashboard' : 'Opportunity workspace'}
-          </h1>
+          <h2 className="sidebar-title">Tools</h2>
         </div>
-        {report ? (
-          <div className="topbar-actions">
-            {currentView === 'opportunities' ? (
-              <button type="button" className="secondary-button" onClick={() => setCurrentView('dashboard')}>
-                Back to dashboard
-              </button>
-            ) : (
-              <button type="button" className="secondary-button" onClick={() => setCurrentView('opportunities')}>
-                Open opportunities
-              </button>
-            )}
-          </div>
-        ) : null}
-      </header>
+        <div className="tool-nav">
+          <button
+            type="button"
+            className={`tool-nav-button ${activeTool === 'onpage' ? 'active' : ''}`}
+            onClick={() => setActiveTool('onpage')}
+          >
+            <span>Onpage Optimization Planning Tool</span>
+            <small>Prioritize URLs and optimization opportunities from exports.</small>
+          </button>
+          <button
+            type="button"
+            className={`tool-nav-button ${activeTool === 'eeat' ? 'active' : ''}`}
+            onClick={() => setActiveTool('eeat')}
+          >
+            <span>EEAT Tool</span>
+            <small>Scan a page for experience, expertise, authority, and trust signals.</small>
+          </button>
+        </div>
+      </aside>
 
-      {currentView === 'dashboard' ? (
+      <div className="tool-content">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">{activeTool === 'onpage' ? 'Onpage Optimization Planning Tool' : 'EEAT Tool'}</p>
+            <h1 className="topbar-title">
+              {activeTool === 'onpage'
+                ? currentView === 'dashboard'
+                  ? 'Main dashboard'
+                  : 'Opportunity workspace'
+                : 'Page-level EEAT analysis'}
+            </h1>
+          </div>
+          {activeTool === 'onpage' && report ? (
+            <div className="topbar-actions">
+              {currentView === 'opportunities' ? (
+                <button type="button" className="secondary-button" onClick={() => setCurrentView('dashboard')}>
+                  Back to dashboard
+                </button>
+              ) : (
+                <button type="button" className="secondary-button" onClick={() => setCurrentView('opportunities')}>
+                  Open opportunities
+                </button>
+              )}
+            </div>
+          ) : null}
+        </header>
+
+        {activeTool === 'onpage' ? (
+        <>
+        {currentView === 'dashboard' ? (
         <>
           <section className="panel toolbar-panel">
             <div className="toolbar-row">
@@ -345,6 +518,11 @@ function App() {
                   <input id="spreadsheet-input" type="file" accept=".csv,.xlsx,.xls,.tsv" onChange={handleFileChange} />
                   <strong>{isProcessingFile ? 'Reading your sheet...' : 'Upload SEO sheet'}</strong>
                   <span>{fileName ? `Loaded: ${fileName}` : 'CSV, Excel, and TSV supported'}</span>
+                </label>
+                <label className="upload-card toolbar-upload secondary-upload" htmlFor="used-opportunities-input">
+                  <input id="used-opportunities-input" type="file" accept=".csv,.xlsx,.xls,.tsv" onChange={handleUsedOpportunitiesChange} />
+                  <strong>{isProcessingUsedFile ? 'Cross-referencing history...' : 'Upload recent optimizations'}</strong>
+                  <span>{usedOpportunityFileName ? `Loaded: ${usedOpportunityFileName}` : 'Optional list of already used opportunities'}</span>
                 </label>
                 <button
                   type="button"
@@ -405,9 +583,12 @@ function App() {
                                 <span className="dashboard-score">{opportunity.displayScore}</span>
                                 <h4>{opportunity.keyword ?? 'Untitled opportunity'}</h4>
                               </div>
-                              <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
-                                {opportunity.cannibalizationRisk}
-                              </span>
+                              <div className="card-pill-stack">
+                                {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recently optimized</span> : null}
+                                <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
+                                  {opportunity.cannibalizationRisk}
+                                </span>
+                              </div>
                             </div>
                             <p className="dashboard-url">{opportunity.url}</p>
                             <p className="dashboard-reason">{opportunity.reason}</p>
@@ -523,7 +704,46 @@ function App() {
                     />
                     <small>Comma-separated. Used to deprioritize competitor keywords.</small>
                   </label>
+
+                  <label className="setting-card">
+                    <span>Recent optimization handling</span>
+                    <select
+                      value={settings.recentOptimizationMode}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          recentOptimizationMode: event.target.value as RecentOptimizationMode,
+                        }))
+                      }
+                    >
+                      <option value="exclude">Exclude recent opportunities</option>
+                      <option value="deprioritize">Deprioritize recent opportunities</option>
+                    </select>
+                    <small>Controls how the tool treats pages or keywords already worked on recently.</small>
+                  </label>
+
+                  <label className="setting-card">
+                    <span>Recent optimization window (days)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={settings.recentOptimizationWindowDays}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          recentOptimizationWindowDays: Number(event.target.value || 1),
+                        }))
+                      }
+                    />
+                    <small>Used when the history file includes a date column.</small>
+                  </label>
                 </div>
+                {usedOpportunityFileName ? (
+                  <p className="rail-note">
+                    History loaded: {usedOpportunityFileName}
+                    {usedOpportunityLookup.hasDateColumn ? `, using a ${settings.recentOptimizationWindowDays}-day window.` : ', no date column detected so all matched rows count as recent.'}
+                  </p>
+                ) : null}
               </section>
 
               <section className="panel rail-panel">
@@ -636,9 +856,12 @@ function App() {
                             <span className="dashboard-score">{opportunity.displayScore}</span>
                             <h4>{opportunity.keyword ?? 'Untitled opportunity'}</h4>
                           </div>
-                          <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
-                            {opportunity.cannibalizationRisk} cannibalization
-                          </span>
+                          <div className="card-pill-stack">
+                            {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recently optimized</span> : null}
+                            <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
+                              {opportunity.cannibalizationRisk} cannibalization
+                            </span>
+                          </div>
                         </div>
                         <p className="dashboard-url">{opportunity.url}</p>
                         <p className="dashboard-reason">{opportunity.reason}</p>
@@ -721,9 +944,12 @@ function App() {
                               <td>{opportunity.inferredIntent}</td>
                               <td>{opportunity.inferredPageType}</td>
                               <td>
-                                <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
-                                  {opportunity.cannibalizationRisk} ({opportunity.competingUrlCount})
-                                </span>
+                                <div className="table-pill-stack">
+                                  {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recent</span> : null}
+                                  <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
+                                    {opportunity.cannibalizationRisk} ({opportunity.competingUrlCount})
+                                  </span>
+                                </div>
                               </td>
                               <td>
                                 <select
@@ -786,9 +1012,263 @@ function App() {
           )}
         </section>
       )}
+        </>
+      ) : (
+        <section className="eeat-shell">
+          <section className="panel toolbar-panel">
+            <div className="toolbar-row">
+              <div>
+                <p className="panel-kicker">EEAT Scanner</p>
+                <h2>Scan a page for trust and authority signals</h2>
+                <p className="panel-copy">
+                  This tool fetches the page, reviews visible content and media, checks linked trust pages, and highlights which EEAT signals are present or missing.
+                </p>
+              </div>
+              <div className="toolbar-actions eeat-toolbar-actions">
+                <input
+                  type="url"
+                  placeholder="https://example.com/page-to-review"
+                  value={eeatUrl}
+                  onChange={(event) => setEeatUrl(event.target.value)}
+                />
+                <button type="button" onClick={() => void runEeatScan(eeatUrl)}>
+                  {isScanningEeat ? 'Scanning page...' : 'Run EEAT scan'}
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {eeatError ? <p className="error-text">{eeatError}</p> : null}
+
+          {eeatResult ? (
+            <section className="dashboard-shell eeat-dashboard-shell">
+              <div className="dashboard-main">
+                <article className="panel output-panel preview-panel">
+                  <div className="report-hero">
+                    <div>
+                      <p className="report-source">{eeatResult.url}</p>
+                      <h3>{eeatResult.analysis.summary}</h3>
+                    </div>
+                    <div className="score-badge">
+                      <span>EEAT score</span>
+                      <strong>{eeatResult.analysis.score}</strong>
+                    </div>
+                  </div>
+
+                  <div className="metric-grid">
+                    <article className="metric-card">
+                      <span>Meaningful images</span>
+                      <strong>{eeatResult.analysis.visualSummary.meaningfulImageCount}</strong>
+                      <small>Non-decorative images detected on the page</small>
+                    </article>
+                    <article className="metric-card">
+                      <span>Videos</span>
+                      <strong>{eeatResult.analysis.visualSummary.videoCount}</strong>
+                      <small>Video or embedded media blocks found</small>
+                    </article>
+                    <article className="metric-card">
+                      <span>Screenshot-like visuals</span>
+                      <strong>{eeatResult.analysis.visualSummary.screenshotLikeImages}</strong>
+                      <small>Images that look like examples, screenshots, or proof</small>
+                    </article>
+                    <article className="metric-card">
+                      <span>Decorative images</span>
+                      <strong>{eeatResult.analysis.visualSummary.decorativeImageCount}</strong>
+                      <small>Likely logos, icons, or decorative assets</small>
+                    </article>
+                  </div>
+                </article>
+
+                <article className="panel preview-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">Strengths</p>
+                      <h3>Signals found</h3>
+                    </div>
+                  </div>
+                  <div className="findings-list">
+                    {eeatResult.analysis.strengths.length > 0 ? eeatResult.analysis.strengths.map((strength) => (
+                      <article key={strength} className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>present</span>
+                          <h4>{strength}</h4>
+                        </div>
+                      </article>
+                    )) : (
+                      <article className="finding-card severity-medium">
+                        <div className="finding-topline">
+                          <span>limited</span>
+                          <h4>No strong EEAT strengths stood out yet</h4>
+                        </div>
+                      </article>
+                    )}
+                  </div>
+                </article>
+
+                <article className="panel preview-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">Gaps</p>
+                      <h3>Signals missing or weak</h3>
+                    </div>
+                  </div>
+                  <div className="findings-list">
+                    {eeatResult.analysis.priorities.length > 0 ? eeatResult.analysis.priorities.map((gap) => (
+                      <article key={gap} className="finding-card severity-medium">
+                        <div className="finding-topline">
+                          <span>priority</span>
+                          <h4>{gap}</h4>
+                        </div>
+                      </article>
+                    )) : (
+                      <article className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>strong</span>
+                          <h4>No major EEAT gaps were detected from this first-pass scan</h4>
+                        </div>
+                      </article>
+                    )}
+                  </div>
+                </article>
+
+                <article className="panel preview-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">Answer block</p>
+                      <h3>Opening content preview</h3>
+                    </div>
+                  </div>
+                  <div className="panel-subsection">
+                    <p className="mini-note">{eeatResult.analysis.firstWords || 'No opening copy preview could be extracted.'}</p>
+                  </div>
+                </article>
+              </div>
+
+              <aside className="dashboard-rail">
+                <section className="panel rail-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">Page summary</p>
+                      <h3>Key page details</h3>
+                    </div>
+                  </div>
+                  <div className="settings-grid">
+                    <article className="setting-card">
+                      <span>Title tag</span>
+                      <small>{eeatResult.analysis.title || 'No title detected'}</small>
+                    </article>
+                    <article className="setting-card">
+                      <span>Meta description</span>
+                      <small>{eeatResult.analysis.metaDescription || 'No meta description detected'}</small>
+                    </article>
+                    <article className="setting-card">
+                      <span>Word count</span>
+                      <small>{eeatResult.analysis.pageSignals.wordCount} visible words on the scanned page</small>
+                    </article>
+                    <article className="setting-card">
+                      <span>Heading count</span>
+                      <small>{eeatResult.analysis.pageSignals.headingCount} headings detected on the page</small>
+                    </article>
+                  </div>
+                </section>
+
+                <section className="panel rail-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">Formula</p>
+                      <h3>How the score is calculated</h3>
+                    </div>
+                  </div>
+                  <div className="findings-list">
+                    <article className="finding-card severity-low">
+                      <div className="finding-topline">
+                        <span>formula</span>
+                        <h4>{eeatResult.analysis.formula.earnedPoints} / {eeatResult.analysis.formula.totalPoints} points</h4>
+                      </div>
+                      <p>{eeatResult.analysis.formula.explanation}</p>
+                    </article>
+                    {eeatResult.analysis.formula.categories.map((category) => (
+                      <article key={category.id} className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>category</span>
+                          <h4>{category.label}</h4>
+                        </div>
+                        <p>{category.earned} / {category.max} points</p>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              </aside>
+            </section>
+          ) : (
+            <section className="panel empty-state center-empty">
+              <p>Enter a page URL to review EEAT signals on that page.</p>
+            </section>
+          )}
+
+          {eeatResult ? (
+            <section className="panel output-panel workspace-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="panel-kicker">EEAT categories</p>
+                  <h2>Signal-by-signal breakdown</h2>
+                </div>
+                <p className="panel-copy">Each section below is scored independently so you can see what is helping trust and what still needs work.</p>
+              </div>
+
+              <div className="dashboard-list eeat-category-grid">
+                {eeatResult.analysis.categories.map((category) => (
+                  <article key={category.id} className="dashboard-card eeat-card">
+                    <div className="dashboard-header">
+                      <div>
+                        <span className="dashboard-score">{category.earned}/{category.max}</span>
+                        <h4>{category.label}</h4>
+                      </div>
+                    </div>
+                    <p className="dashboard-reason">{category.summary}</p>
+                    <div className="findings-list compact-findings">
+                      {category.findings.map((item) => (
+                        <article key={`${category.id}-${item}`} className="finding-card severity-low">
+                          <div className="finding-topline">
+                            <span>found</span>
+                            <h4>{item}</h4>
+                          </div>
+                        </article>
+                      ))}
+                      {category.gaps.map((item) => (
+                        <article key={`${category.id}-gap-${item}`} className="finding-card severity-medium">
+                          <div className="finding-topline">
+                            <span>gap</span>
+                            <h4>{item}</h4>
+                          </div>
+                        </article>
+                      ))}
+                      <article className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>recommendation</span>
+                          <h4>{category.recommendation}</h4>
+                        </div>
+                      </article>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </section>
+      )}
+      </div>
     </main>
   )
-}function analyzeSheet(fileName: string, rows: RowRecord[], settings: AnalysisSettings, customRules: string): AnalysisReport {
+}
+
+function analyzeSheet(
+  fileName: string,
+  rows: RowRecord[],
+  settings: AnalysisSettings,
+  customRules: string,
+  usedOpportunityLookup: UsedOpportunityLookup,
+): AnalysisReport {
   const findings: Finding[] = []
   const headers = rows.length > 0 ? Object.keys(rows[0]) : []
   const fieldMap = detectFieldMap(headers)
@@ -817,29 +1297,52 @@ function App() {
     findings.push({ id: 'missing-keyword-column', severity: 'medium', title: 'No keyword column was detected', detail: 'The scoring formula works better when the export includes a keyword or query column.' })
   }
 
+  const lowValueRows = rows.filter((row) => isLowValueOpportunityUrl(asText(row[fieldMap.url ?? ''])))
+  if (lowValueRows.length > 0) {
+    findings.push({
+      id: 'low-value-urls-filtered',
+      severity: 'medium',
+      title: 'Low-value SEO target URLs were filtered out',
+      detail: `${lowValueRows.length} rows looked like pagination, archive, search, or faceted/filter URLs, so they were excluded from recommendations.`,
+    })
+  }
+
   const baseCandidates = rows
     .map((row) => buildBaseCandidate(row, fieldMap, settings))
     .filter((candidate): candidate is BaseCandidate => candidate !== null)
 
   const keywordGroups = buildKeywordGroups(baseCandidates)
   const allCandidates = baseCandidates
-    .map((candidate) => finalizeOpportunityCandidate(candidate, keywordGroups, settings))
+    .map((candidate) => finalizeOpportunityCandidate(candidate, keywordGroups, settings, usedOpportunityLookup))
     .sort((left, right) => right.baseOpportunityScore - left.baseOpportunityScore)
+  const recentlyOptimizedCandidates = allCandidates.filter((candidate) => candidate.recentlyOptimized)
+  const eligibleCandidates = settings.recentOptimizationMode === 'exclude'
+    ? allCandidates.filter((candidate) => !candidate.recentlyOptimized)
+    : allCandidates
 
-  const secondPageCandidates = allCandidates.filter((candidate) => candidate.bucket === 'second-page')
-  const belowSecondPageCandidates = allCandidates.filter((candidate) => candidate.bucket === 'below-second-page')
+  const secondPageCandidates = eligibleCandidates.filter((candidate) => candidate.bucket === 'second-page')
+  const belowSecondPageCandidates = eligibleCandidates.filter((candidate) => candidate.bucket === 'below-second-page')
   const candidates = settings.strategy === 'second-page-first'
     ? (secondPageCandidates.length > 0 ? secondPageCandidates : belowSecondPageCandidates).slice(0, 12)
-    : allCandidates.slice(0, 12)
+    : eligibleCandidates.slice(0, 12)
 
-  const cannibalizedCandidates = allCandidates.filter((candidate) => candidate.cannibalizationRisk !== 'none')
-  const reviewCandidates = allCandidates.filter((candidate) => candidate.relevanceLabel.includes('review') || candidate.relevanceLabel.includes('Low'))
+  const cannibalizedCandidates = eligibleCandidates.filter((candidate) => candidate.cannibalizationRisk !== 'none')
+  const reviewCandidates = eligibleCandidates.filter((candidate) => candidate.relevanceLabel.includes('review') || candidate.relevanceLabel.includes('Low'))
 
   if (candidates.length === 0) findings.push({ id: 'no-matches', severity: 'medium', title: 'No rows matched the current opportunity rules', detail: 'This usually means rankings, search volume, or relevance conditions filtered everything out.' })
   if (secondPageCandidates.length > 0) findings.push({ id: 'second-page-targets', severity: 'high', title: 'Second-page opportunities were found', detail: `${secondPageCandidates.length} rows are ranking between positions 11 and 20 with enough search volume to target now.` })
   else if (belowSecondPageCandidates.length > 0) findings.push({ id: 'fallback-targets', severity: 'medium', title: 'The tool fell back to below-page-two opportunities', detail: 'No strong second-page rows were found, so the app surfaced lower-ranked opportunities instead.' })
   if (cannibalizedCandidates.length > 0) findings.push({ id: 'cannibalization-risk', severity: 'high', title: 'Possible cannibalization was detected', detail: `${cannibalizedCandidates.length} candidate rows share keywords with competing URLs and may need consolidation or clearer targeting.` })
   if (reviewCandidates.length > 0) findings.push({ id: 'review-needed', severity: 'medium', title: 'Some surfaced rows still need strategist review', detail: `${reviewCandidates.length} surfaced rows have weak or uncertain relevance signals and should be checked manually.` })
+  if (recentlyOptimizedCandidates.length > 0) findings.push({
+    id: 'recently-optimized-filter',
+    severity: 'medium',
+    title: settings.recentOptimizationMode === 'exclude' ? 'Recently optimized opportunities were filtered out' : 'Recently optimized opportunities were deprioritized',
+    detail: usedOpportunityLookup.hasDateColumn
+      ? `${recentlyOptimizedCandidates.length} rows matched your optimization history within the last ${settings.recentOptimizationWindowDays} days.`
+      : `${recentlyOptimizedCandidates.length} rows matched your previously used opportunities list${settings.recentOptimizationMode === 'exclude' ? ' and were excluded' : ' and were deprioritized'}.`,
+  })
+  if (usedOpportunityLookup.keys.size > 0 && !usedOpportunityLookup.hasDateColumn) findings.push({ id: 'used-opportunities-no-date', severity: 'low', title: 'Optimization history loaded without a date column', detail: 'The tool can still cross-reference by URL and keyword, but the time window only works when the history file includes a date-style column.' })
   if (fieldMap.relevance) findings.push({ id: 'relevance-column-found', severity: 'low', title: 'A relevance-style column was detected', detail: `The app detected ${fieldMap.relevance} and uses it when your relevance setting allows it.` })
   if (customRules.trim()) findings.push({ id: 'custom-rule-note', severity: 'low', title: 'Custom rule note captured', detail: 'Your notes are saved in the UI and ready for the next coding round.' })
 
@@ -847,8 +1350,10 @@ function App() {
   const metrics: Metric[] = [
     { label: 'Rows analyzed', value: String(rows.length), hint: 'Rows processed from the first sheet' },
     { label: 'Top matches', value: String(candidates.length), hint: 'Rows surfaced by your current rules' },
+    { label: 'Low-value URLs', value: String(lowValueRows.length), hint: 'Pagination, archive, search, or filter URLs excluded' },
+    { label: 'Used matches', value: String(recentlyOptimizedCandidates.length), hint: settings.recentOptimizationMode === 'exclude' ? 'Rows excluded because they were recently optimized' : 'Rows deprioritized because they were recently optimized' },
     { label: 'Cannibalized rows', value: String(cannibalizedCandidates.length), hint: 'Candidates sharing keywords across URLs' },
-    { label: 'Average volume', value: String(averageVolume), hint: 'Across surfaced opportunities' },
+    { label: 'Average volume', value: String(averageVolume), hint: 'Across surfaced recommendations' },
   ]
 
   return {
@@ -887,6 +1392,7 @@ function buildBaseCandidate(row: RowRecord, fieldMap: Partial<Record<FieldKey, s
   const ranking = parseNumber(row[fieldMap.ranking ?? ''])
 
   if (!url || searchVolume === null || ranking === null) return null
+  if (isLowValueOpportunityUrl(url)) return null
   if (searchVolume < settings.minimumSearchVolume) return null
 
   const normalizedKeyword = normalizeHeader(keyword)
@@ -934,11 +1440,17 @@ function buildBaseCandidate(row: RowRecord, fieldMap: Partial<Record<FieldKey, s
     ),
   }
 }
-function finalizeOpportunityCandidate(candidate: BaseCandidate, keywordGroups: Map<string, Set<string>>, settings: AnalysisSettings): Opportunity {
+function finalizeOpportunityCandidate(
+  candidate: BaseCandidate,
+  keywordGroups: Map<string, Set<string>>,
+  settings: AnalysisSettings,
+  usedOpportunityLookup: UsedOpportunityLookup,
+): Opportunity {
   const normalizedKeyword = normalizeHeader(candidate.keyword ?? '')
   const competingUrlCount = normalizedKeyword ? (keywordGroups.get(normalizedKeyword)?.size ?? 1) : 1
   const cannibalizationRisk: CannibalizationRisk = competingUrlCount >= 4 ? 'high' : competingUrlCount >= 2 ? 'medium' : 'none'
   const pageTypeAlignment = scorePageTypeAlignment(candidate.inferredIntent, candidate.inferredPageType)
+  const recentlyOptimized = isRecentlyOptimized(candidate.url, candidate.keyword, usedOpportunityLookup, settings.recentOptimizationWindowDays)
 
   const baseOpportunityScore = calculateCandidateScore({
     ranking: candidate.ranking,
@@ -950,6 +1462,8 @@ function finalizeOpportunityCandidate(candidate: BaseCandidate, keywordGroups: M
     strategy: settings.strategy,
     pageTypeAlignmentScore: pageTypeAlignment.score,
     cannibalizationRisk,
+    recentlyOptimized,
+    recentOptimizationMode: settings.recentOptimizationMode,
   })
 
   return {
@@ -977,6 +1491,7 @@ function finalizeOpportunityCandidate(candidate: BaseCandidate, keywordGroups: M
     inferredPageType: candidate.inferredPageType,
     cannibalizationRisk,
     competingUrlCount,
+    recentlyOptimized,
   }
 }
 
@@ -1013,6 +1528,43 @@ function calculateKeywordHeuristic(keyword: string, url: string) {
   if (matches === 0) return { score, label: 'Keyword not evident in URL - review' }
   if (matches < keywordTerms.length) return { score, label: 'Partial keyword-to-URL match' }
   return { score, label: 'Strong keyword-to-URL match' }
+}
+
+function isLowValueOpportunityUrl(url: string) {
+  if (!url.trim()) return false
+
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname.toLowerCase()
+    const normalizedUrl = `${parsed.hostname}${parsed.pathname}${parsed.search}`.toLowerCase()
+    const pageParam = parsed.searchParams.get('page')
+    const pagedParam = parsed.searchParams.get('paged')
+    const startsAtParam = parsed.searchParams.get('start')
+    const hasSearchPath = /\/(search|results)\//.test(path) || path === '/search'
+    const hasArchivePath = /\/(tag|author|archive|category|product-category)\//.test(path)
+    const hasSortOrFilterParam = Array.from(parsed.searchParams.keys()).some((key) =>
+      /^(filter_|orderby|order|sort|min_price|max_price|price|brand|color|size|view|query_type_|stock_status|product_cat|rating_filter|filter|facet)/.test(key.toLowerCase()),
+    )
+
+    if (/\/page\/\d+\/?$/.test(path)) return true
+    if (hasArchivePath && /\/page\/\d+\/?$/.test(path)) return true
+    if ((pageParam && Number(pageParam) > 1) || (pagedParam && Number(pagedParam) > 1)) return true
+    if (startsAtParam && Number(startsAtParam) > 0) return true
+    if (hasSearchPath || parsed.searchParams.has('s') || parsed.searchParams.has('search')) return true
+    if (hasSortOrFilterParam) return true
+    if (hasArchivePath && !/\/(product|service|services|blog|guide|collection)\//.test(path) && !/\/page\/?$/.test(path)) {
+      return normalizedUrl.includes('?') || /\/tag\/|\/author\/|\/archive\//.test(path)
+    }
+    return false
+  } catch {
+    const normalized = url.toLowerCase()
+    return (
+      /\/page\/\d+\/?$/.test(normalized) ||
+      /[?&](page|paged)=\d+/.test(normalized) ||
+      /\/(tag|author|archive|search|results)\//.test(normalized) ||
+      /[?&](s|search|orderby|order|sort|min_price|max_price|brand|color|size|filter)=/.test(normalized)
+    )
+  }
 }
 
 function inferIntent(keyword: string | null): Intent {
@@ -1080,6 +1632,8 @@ function calculateCandidateScore(input: {
   strategy: RankingStrategy
   pageTypeAlignmentScore: number
   cannibalizationRisk: CannibalizationRisk
+  recentlyOptimized: boolean
+  recentOptimizationMode: RecentOptimizationMode
 }) {
   let score = 0
   if (input.bucket === 'second-page') {
@@ -1099,6 +1653,7 @@ function calculateCandidateScore(input: {
   if (input.traffic !== null) score += Math.min(input.traffic / 20, 12)
   if (input.cannibalizationRisk === 'high') score -= 18
   if (input.cannibalizationRisk === 'medium') score -= 8
+  if (input.recentlyOptimized && input.recentOptimizationMode === 'deprioritize') score -= 28
   return Math.round(Math.max(0, score))
 }
 
@@ -1108,6 +1663,75 @@ function calculateOpportunityScore(candidates: Opportunity[], settings: Analysis
   let score = Math.min(100, bestCandidate.baseOpportunityScore)
   if (settings.strategy === 'second-page-first' && bestCandidate.bucket === 'second-page') score = Math.min(100, score + 8)
   return score
+}
+
+function buildUsedOpportunityLookup(rows: RowRecord[]): UsedOpportunityLookup {
+  if (rows.length === 0) {
+    return {
+      keys: new Set<string>(),
+      datedKeys: new Map<string, number>(),
+      hasDateColumn: false,
+    }
+  }
+
+  const headers = Object.keys(rows[0])
+  const fieldMap = detectFieldMap(headers)
+  const hasDateColumn = Boolean(fieldMap.lastOptimized)
+  const keys = new Set<string>()
+  const datedKeys = new Map<string, number>()
+
+  rows.forEach((row) => {
+    const url = normalizeComparableUrl(asText(row[fieldMap.url ?? '']))
+    const keyword = normalizeHeader(asText(row[fieldMap.keyword ?? '']))
+    const optimizedAt = parseDateValue(row[fieldMap.lastOptimized ?? ''])
+
+    if (url) {
+      keys.add(`url:${url}`)
+      if (optimizedAt !== null) datedKeys.set(`url:${url}`, optimizedAt)
+    }
+
+    if (url && keyword) {
+      const key = `url-keyword:${url}::${keyword}`
+      keys.add(key)
+      if (optimizedAt !== null) datedKeys.set(key, optimizedAt)
+    }
+  })
+
+  return { keys, datedKeys, hasDateColumn }
+}
+
+function isRecentlyOptimized(
+  url: string,
+  keyword: string | null,
+  usedOpportunityLookup: UsedOpportunityLookup,
+  recentOptimizationWindowDays: number,
+) {
+  if (usedOpportunityLookup.keys.size === 0) return false
+
+  const normalizedUrl = normalizeComparableUrl(url)
+  const normalizedKeyword = normalizeHeader(keyword ?? '')
+  const now = Date.now()
+  const maxAgeMs = Math.max(1, recentOptimizationWindowDays) * 24 * 60 * 60 * 1000
+  const matchesWindow = (key: string) => {
+    const optimizedAt = usedOpportunityLookup.datedKeys.get(key)
+    if (optimizedAt === undefined) return !usedOpportunityLookup.hasDateColumn
+    return now - optimizedAt <= maxAgeMs
+  }
+
+  if (
+    normalizedUrl &&
+    normalizedKeyword &&
+    usedOpportunityLookup.keys.has(`url-keyword:${normalizedUrl}::${normalizedKeyword}`) &&
+    matchesWindow(`url-keyword:${normalizedUrl}::${normalizedKeyword}`)
+  ) {
+    return true
+  }
+
+  if (normalizedUrl && usedOpportunityLookup.keys.has(`url:${normalizedUrl}`) && matchesWindow(`url:${normalizedUrl}`)) {
+    return true
+  }
+
+  return false
 }
 
 function applyOverride(score: number, override: OverrideChoice) {
@@ -1131,6 +1755,22 @@ function getOverrideMeta(override: OverrideChoice) {
 }
 
 function normalizeHeader(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() }
+function normalizeComparableUrl(value: string) {
+  const text = value.trim()
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    return `${parsed.hostname}${parsed.pathname}`.replace(/\/+$/, '').toLowerCase()
+  } catch {
+    return text.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '')
+  }
+}
+function parseDateValue(value: RowRecord[string]) {
+  const text = asText(value)
+  if (!text) return null
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
 function parseTermList(value: string) { return value.split(',').map((item) => normalizeHeader(item)).filter(Boolean) }
 function asText(value: RowRecord[string]) { return String(value ?? '').trim() }
 function parseNumber(value: RowRecord[string]) { const text = asText(value); if (!text) return null; const cleaned = text.replace(/,/g, '').replace(/%/g, ''); const parsed = Number(cleaned); return Number.isFinite(parsed) ? parsed : null }
