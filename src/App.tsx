@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import * as XLSX from 'xlsx'
 import './App.css'
@@ -116,6 +116,25 @@ type EeatCategory = {
 type EeatScanResponse = {
   url: string
   title: string
+  geminiEnhancement?: {
+    provider: 'gemini'
+    enabled: boolean
+    status: 'disabled' | 'missing_key' | 'rate_limited' | 'error' | 'applied'
+    keySource?: 'server' | 'session' | 'none'
+    model?: string
+    message: string
+    summary?: string
+    trustVerdict?: 'supports' | 'mixed' | 'weak'
+    confidence?: EeatConfidence
+    agreementWithRules?: string
+    overstatementRisk?: string[]
+    blindSpots?: string[]
+    refinedQuickWins?: Array<{
+      label: string
+      reason: string
+      action: string
+    }>
+  }
   visualCapture?: {
     available: boolean
     screenshotDataUrl?: string
@@ -172,6 +191,7 @@ type EeatScanResponse = {
       headingCount: number
       contactLinkCount: number
       policyLinkCount: number
+      visibleContactDetailCount: number
       outboundLinkCount: number
       authoritativeOutboundLinkCount: number
     }
@@ -183,13 +203,20 @@ type BulkScanResult = PageScanResponse & {
 }
 
 type RowRecord = Record<string, string | number | boolean | null | undefined>
+type SignalState = 'found' | 'partial' | 'missing'
 
-async function fetchJsonWithTimeout(url: string, timeoutMs: number) {
+type GeminiStatus = {
+  availableFromEnv: boolean
+  recommendedConnectionMethod: 'api-key'
+  message: string
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number, init?: RequestInit) {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const response = await fetch(url, { signal: controller.signal })
+    const response = await fetch(url, { ...init, signal: controller.signal })
     const contentType = response.headers.get('content-type') ?? ''
     const rawBody = await response.text()
     const data = contentType.includes('application/json')
@@ -323,6 +350,9 @@ function App() {
   const [eeatBatchError, setEeatBatchError] = useState('')
   const [isScanningEeat, setIsScanningEeat] = useState(false)
   const [isBatchScanningEeat, setIsBatchScanningEeat] = useState(false)
+  const [useGeminiEnhancement, setUseGeminiEnhancement] = useState(true)
+  const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [geminiStatus, setGeminiStatus] = useState<GeminiStatus | null>(null)
   const [isBulkScanning, setIsBulkScanning] = useState(false)
   const [scanOverride, setScanOverride] = useState<OverrideChoice>('auto')
   const [opportunityOverrides, setOpportunityOverrides] = useState<Record<string, OverrideChoice>>({})
@@ -335,6 +365,26 @@ function App() {
 
     return analyzeSheet(fileName, uploadedRows, settings, '', usedOpportunityLookup)
   }, [fileName, settings, uploadedRows, usedOpportunityLookup])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const data = await fetchJsonWithTimeout('/api/gemini-status', 12000)
+        const status = data as GeminiStatus
+        setGeminiStatus(status)
+        if (!status.availableFromEnv) {
+          setUseGeminiEnhancement(false)
+        }
+      } catch {
+        setGeminiStatus({
+          availableFromEnv: false,
+          recommendedConnectionMethod: 'api-key',
+          message: 'Gemini status could not be loaded right now. The base audit still works normally.',
+        })
+        setUseGeminiEnhancement(false)
+      }
+    })()
+  }, [])
 
   const displayedOpportunities = useMemo(() => {
     if (!report) {
@@ -458,8 +508,15 @@ function App() {
     setEeatUrl(targetUrl)
 
     try {
-      const params = new URLSearchParams({ url: targetUrl.trim() })
-      const data = await fetchJsonWithTimeout(`/api/eeat-scan?${params.toString()}`, 45000)
+      const data = await fetchJsonWithTimeout('/api/eeat-scan', 60000, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: targetUrl.trim(),
+          useGemini: useGeminiEnhancement,
+          geminiApiKey: geminiApiKey.trim(),
+        }),
+      })
       setEeatResult(data as EeatScanResponse)
     } catch (error) {
       setEeatResult(null)
@@ -483,11 +540,18 @@ function App() {
     setIsBatchScanningEeat(true)
     setEeatBatchError('')
 
-    try {
-      const results: EeatScanResponse[] = []
-      for (const url of urls) {
-        const params = new URLSearchParams({ url })
-        const data = await fetchJsonWithTimeout(`/api/eeat-scan?${params.toString()}`, 45000)
+      try {
+        const results: EeatScanResponse[] = []
+        for (const url of urls) {
+        const data = await fetchJsonWithTimeout('/api/eeat-scan', 60000, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url,
+            useGemini: useGeminiEnhancement,
+            geminiApiKey: geminiApiKey.trim(),
+          }),
+        })
         results.push(data as EeatScanResponse)
       }
 
@@ -584,6 +648,61 @@ function App() {
       return map
     }, {})
   }, [eeatResult])
+  const eeatSignalSnapshot = useMemo(() => {
+    if (!eeatResult) return []
+
+    const labels: Record<string, string> = {
+      'author-credibility': 'Author',
+      'first-hand-experience': 'Experience',
+      'reviewed-by': 'Validation',
+      'contact-visibility': 'Contact',
+      'policy-legal-visibility': 'Policy',
+      'schema-markup': 'Schema',
+    }
+
+    return eeatResult.analysis.categories
+      .filter((category) => category.id in labels)
+      .map((category) => {
+        const ratio = category.max > 0 ? category.earned / category.max : 0
+        let state: SignalState = 'missing'
+        if (ratio >= 0.7) state = 'found'
+        else if (ratio > 0) state = 'partial'
+
+        return {
+          id: category.id,
+          label: labels[category.id],
+          state,
+          detail: category.summary,
+        }
+      })
+  }, [eeatResult])
+  const eeatWeakestCategories = useMemo(() => {
+    if (!eeatResult) return []
+
+    return [...eeatResult.analysis.categories]
+      .sort((left, right) => (left.earned / left.max) - (right.earned / right.max))
+      .slice(0, 4)
+  }, [eeatResult])
+  const showGeminiFallbackKeyField = useMemo(() => {
+    if (!geminiStatus?.availableFromEnv) return true
+
+    const resultStatus = eeatResult?.geminiEnhancement?.status
+    return resultStatus === 'rate_limited' || resultStatus === 'missing_key'
+  }, [eeatResult, geminiStatus])
+  const showGeminiSetupPanel = useMemo(() => {
+    if (!geminiStatus?.availableFromEnv) return true
+    return showGeminiFallbackKeyField
+  }, [geminiStatus, showGeminiFallbackKeyField])
+  const geminiFallbackMessage = useMemo(() => {
+    const status = eeatResult?.geminiEnhancement?.status
+    if (status === 'rate_limited') {
+      return 'Built-in Gemini has hit its current quota. Add your own Gemini API key below if you want to keep using AI-enhanced reviews right now.'
+    }
+    if (status === 'missing_key' && !geminiStatus?.availableFromEnv) {
+      return 'Gemini is not connected on this app instance. Add a Gemini API key below if you want to use the AI second opinion.'
+    }
+    return geminiStatus?.message ?? 'Gemini enhancement is available when configured.'
+  }, [eeatResult, geminiStatus])
 
   return (
     <main className="app-shell app-layout">
@@ -613,21 +732,26 @@ function App() {
       </aside>
 
       <div className="tool-content">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">{activeTool === 'onpage' ? 'Onpage Optimization Planning Tool' : 'EEAT Tool'}</p>
-            <h1 className="topbar-title">
-              {activeTool === 'onpage'
+          <header className="topbar">
+            <div>
+              <p className="eyebrow">{activeTool === 'onpage' ? 'Onpage Optimization Planning Tool' : 'EEAT Tool'}</p>
+              <h1 className="topbar-title">
+                {activeTool === 'onpage'
                 ? currentView === 'dashboard'
                   ? 'Main dashboard'
                   : 'Opportunity workspace'
-                : 'Page-level EEAT analysis'}
-            </h1>
-          </div>
-          {activeTool === 'onpage' && report ? (
-            <div className="topbar-actions">
-              {currentView === 'opportunities' ? (
-                <button type="button" className="secondary-button" onClick={() => setCurrentView('dashboard')}>
+                  : 'Page-level EEAT analysis'}
+              </h1>
+            </div>
+            {activeTool === 'eeat' && geminiStatus?.availableFromEnv ? (
+              <div className="topbar-actions">
+                <span className="feature-badge">Gemini built in</span>
+              </div>
+            ) : null}
+            {activeTool === 'onpage' && report ? (
+              <div className="topbar-actions">
+                {currentView === 'opportunities' ? (
+                  <button type="button" className="secondary-button" onClick={() => setCurrentView('dashboard')}>
                   Back to dashboard
                 </button>
               ) : (
@@ -1189,73 +1313,115 @@ function App() {
                 </button>
               </div>
             </div>
-            <div className="panel-subsection eeat-batch-panel">
-              <div className="subsection-heading">
-                <div>
-                  <p className="panel-kicker">Batch audit</p>
-                  <h3>Scan a list of URLs</h3>
-                </div>
-              </div>
-              <div className="findings-list">
-                <label className="input-block">
-                  <span>URLs, one per line</span>
-                  <textarea
-                    value={eeatBatchInput}
-                    onChange={(event) => setEeatBatchInput(event.target.value)}
-                    placeholder={'https://example.com/page-one\nhttps://example.com/page-two'}
-                  />
-                </label>
-                <div className="toolbar-actions">
-                  <button type="button" onClick={() => void runBatchEeatScan()}>
-                    {isBatchScanningEeat ? 'Scanning list...' : 'Run batch scan'}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={eeatBatchResults.length === 0}
-                    onClick={() => exportEeatJson(eeatBatchResults, 'eeat-batch-audit.json')}
-                  >
-                    Export batch JSON
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={eeatBatchResults.length === 0}
-                    onClick={() => exportEeatCsv(eeatBatchResults, 'eeat-batch-audit.csv')}
-                  >
-                    Export batch CSV
-                  </button>
-                </div>
-                {eeatBatchError ? <p className="error-text">{eeatBatchError}</p> : null}
-                {eeatBatchResults.length > 0 ? (
-                  <div className="opportunity-table-wrap">
-                    <table className="opportunity-table">
-                      <thead>
-                        <tr>
-                          <th>URL</th>
-                          <th>EEAT score</th>
-                          <th>Weakest criterion</th>
-                          <th>Top action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {eeatBatchResults.map((result) => {
-                          const weakest = [...result.analysis.categories].sort((left, right) => (left.earned / left.max) - (right.earned / right.max))[0]
-                          return (
-                            <tr key={result.url}>
-                              <td className="url-cell">{result.url}</td>
-                              <td>{result.analysis.score}</td>
-                              <td>{weakest?.label ?? 'n/a'}</td>
-                              <td>{result.analysis.actionPlan[0]?.recommendation ?? 'No urgent fixes surfaced.'}</td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
+            {showGeminiSetupPanel ? (
+              <details className="disclosure-panel eeat-batch-panel">
+                <summary>{geminiStatus?.availableFromEnv ? 'Gemini fallback access' : 'AI enhancement with Gemini'}</summary>
+                <div className="disclosure-body">
+                  <div className="settings-grid">
+                    <label className="setting-card">
+                      <span>Gemini second opinion</span>
+                      <select value={useGeminiEnhancement ? 'on' : 'off'} onChange={(event) => setUseGeminiEnhancement(event.target.value === 'on')}>
+                        <option value="off">Off</option>
+                        <option value="on">On</option>
+                      </select>
+                      <small>
+                        {geminiStatus?.availableFromEnv
+                          ? 'Built-in Gemini is already available. This section only matters if you need a personal fallback key.'
+                          : 'Your standard audit still works without Gemini.'}
+                      </small>
+                    </label>
+
+                    {showGeminiFallbackKeyField ? (
+                      <label className="setting-card">
+                        <span>{geminiStatus?.availableFromEnv ? 'Use your own Gemini API key' : 'Gemini API key'}</span>
+                        <input
+                          type="password"
+                          placeholder={geminiStatus?.availableFromEnv ? 'Only needed if built-in Gemini hits its limit' : 'Paste a Gemini API key for this session'}
+                          value={geminiApiKey}
+                          onChange={(event) => setGeminiApiKey(event.target.value)}
+                        />
+                        <small>
+                          {geminiStatus?.availableFromEnv
+                            ? 'If shared Gemini usage is exhausted, users can continue immediately by adding their own Gemini API key.'
+                            : 'This stays in the current app session. In a hosted product, this would only appear if shared Gemini usage is unavailable.'}
+                        </small>
+                      </label>
+                    ) : null}
                   </div>
-                ) : null}
+                  <article className="finding-card severity-low">
+                    <div className="finding-topline">
+                      <span>status</span>
+                      <h4>{geminiStatus?.availableFromEnv ? 'One-click Gemini available' : 'Bring-your-own Gemini key supported'}</h4>
+                    </div>
+                    <p>{geminiFallbackMessage}</p>
+                  </article>
+                </div>
+              </details>
+            ) : null}
+            <details className="disclosure-panel eeat-batch-panel">
+              <summary>Batch audit and exports</summary>
+              <div className="disclosure-body">
+                <div className="findings-list">
+                  <label className="input-block">
+                    <span>URLs, one per line</span>
+                    <textarea
+                      value={eeatBatchInput}
+                      onChange={(event) => setEeatBatchInput(event.target.value)}
+                      placeholder={'https://example.com/page-one\nhttps://example.com/page-two'}
+                    />
+                  </label>
+                  <div className="toolbar-actions">
+                    <button type="button" onClick={() => void runBatchEeatScan()}>
+                      {isBatchScanningEeat ? 'Scanning list...' : 'Run batch scan'}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={eeatBatchResults.length === 0}
+                      onClick={() => exportEeatJson(eeatBatchResults, 'eeat-batch-audit.json')}
+                    >
+                      Export batch JSON
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={eeatBatchResults.length === 0}
+                      onClick={() => exportEeatCsv(eeatBatchResults, 'eeat-batch-audit.csv')}
+                    >
+                      Export batch CSV
+                    </button>
+                  </div>
+                  {eeatBatchError ? <p className="error-text">{eeatBatchError}</p> : null}
+                  {eeatBatchResults.length > 0 ? (
+                    <div className="opportunity-table-wrap">
+                      <table className="opportunity-table">
+                        <thead>
+                          <tr>
+                            <th>URL</th>
+                            <th>EEAT score</th>
+                            <th>Weakest criterion</th>
+                            <th>Top action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {eeatBatchResults.map((result) => {
+                            const weakest = [...result.analysis.categories].sort((left, right) => (left.earned / left.max) - (right.earned / right.max))[0]
+                            return (
+                              <tr key={result.url}>
+                                <td className="url-cell">{result.url}</td>
+                                <td>{result.analysis.score}</td>
+                                <td>{weakest?.label ?? 'n/a'}</td>
+                                <td>{result.analysis.actionPlan[0]?.recommendation ?? 'No urgent fixes surfaced.'}</td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
+            </details>
           </section>
 
           {eeatError ? <p className="error-text">{eeatError}</p> : null}
@@ -1282,30 +1448,97 @@ function App() {
                     <span>{eeatResult.analysis.evidenceCoverage}</span>
                   </div>
 
-                    {eeatResult.analysis.actionPlan.length > 0 ? (
-                      <div className="panel-subsection eeat-action-plan">
-                        <div className="subsection-heading">
-                          <div>
-                            <p className="panel-kicker">Quick Wins</p>
-                            <h3>Top 5 EEAT quick wins</h3>
-                          </div>
+                  <div className="signal-snapshot-grid">
+                    {eeatSignalSnapshot.map((signal) => (
+                      <article key={signal.id} className={`signal-card signal-${signal.state}`}>
+                        <span>{signal.label}</span>
+                        <strong>{signal.state === 'found' ? 'Found' : signal.state === 'partial' ? 'Partial' : 'Missing'}</strong>
+                        <small>{signal.detail}</small>
+                      </article>
+                    ))}
+                  </div>
+
+                  {eeatResult.analysis.actionPlan.length > 0 ? (
+                    <div className="panel-subsection eeat-action-plan">
+                      <div className="subsection-heading">
+                        <div>
+                          <p className="panel-kicker">Quick Wins</p>
+                          <h3>Top 5 EEAT quick wins</h3>
                         </div>
+                      </div>
+                      <div className="findings-list compact-findings">
+                        {eeatResult.analysis.actionPlan.map((action) => (
+                          <article key={`${action.priority}-${action.label}`} className="finding-card severity-medium">
+                            <div className="finding-topline">
+                              <span>priority {action.priority}</span>
+                              <h4>{action.label}</h4>
+                            </div>
+                            <p><strong>Why:</strong> {action.reason}</p>
+                            <p><strong>Do next:</strong> {action.recommendation}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {eeatResult.geminiEnhancement?.enabled ? (
+                    <div className="panel-subsection eeat-action-plan">
+                      <div className="subsection-heading">
+                        <div>
+                          <p className="panel-kicker">AI Review</p>
+                          <h3>Gemini second opinion</h3>
+                        </div>
+                      </div>
+                      <article className={`finding-card ${eeatResult.geminiEnhancement.status === 'applied' ? 'severity-low' : 'severity-medium'}`}>
+                        <div className="finding-topline">
+                          <span>{eeatResult.geminiEnhancement.model ?? 'gemini'}</span>
+                          <h4>{eeatResult.geminiEnhancement.status === 'applied' ? 'Applied' : 'Not applied'}</h4>
+                        </div>
+                        <p>{eeatResult.geminiEnhancement.message}</p>
+                        {eeatResult.geminiEnhancement.summary ? <p><strong>Summary:</strong> {eeatResult.geminiEnhancement.summary}</p> : null}
+                        {eeatResult.geminiEnhancement.agreementWithRules ? <p><strong>Agreement:</strong> {eeatResult.geminiEnhancement.agreementWithRules}</p> : null}
+                        {eeatResult.geminiEnhancement.trustVerdict ? (
+                          <p>
+                            <strong>Verdict:</strong> {eeatResult.geminiEnhancement.trustVerdict}
+                            {eeatResult.geminiEnhancement.confidence ? ` (${eeatResult.geminiEnhancement.confidence} confidence)` : ''}
+                          </p>
+                        ) : null}
+                      </article>
+
+                      {eeatResult.geminiEnhancement.status === 'applied' ? (
                         <div className="findings-list compact-findings">
-                          {eeatResult.analysis.actionPlan.map((action) => (
-                            <article key={`${action.priority}-${action.label}`} className="finding-card severity-medium">
+                          {(eeatResult.geminiEnhancement.refinedQuickWins ?? []).map((item) => (
+                            <article key={`gemini-${item.label}`} className="finding-card severity-low">
                               <div className="finding-topline">
-                                <span>priority {action.priority}</span>
-                                <h4>{action.label}</h4>
+                                <span>ai quick win</span>
+                                <h4>{item.label}</h4>
                               </div>
-                              <p><strong>Why:</strong> {action.reason}</p>
-                              <p><strong>Do next:</strong> {action.recommendation}</p>
+                              <p><strong>Why:</strong> {item.reason}</p>
+                              <p><strong>Do next:</strong> {item.action}</p>
+                            </article>
+                          ))}
+                          {(eeatResult.geminiEnhancement.overstatementRisk ?? []).map((item) => (
+                            <article key={`over-${item}`} className="finding-card severity-medium">
+                              <div className="finding-topline">
+                                <span>overstatement risk</span>
+                                <h4>{item}</h4>
+                              </div>
+                            </article>
+                          ))}
+                          {(eeatResult.geminiEnhancement.blindSpots ?? []).map((item) => (
+                            <article key={`blind-${item}`} className="finding-card severity-low">
+                              <div className="finding-topline">
+                                <span>blind spot</span>
+                                <h4>{item}</h4>
+                              </div>
                             </article>
                           ))}
                         </div>
-                      </div>
-                    ) : null}
+                      ) : null}
+                    </div>
+                  ) : null}
 
-                  <div className="metric-grid">
+                  <div className="metric-grid eeat-hero-metrics">
                     <article className="metric-card">
                       <span>Meaningful images</span>
                       <strong>{eeatResult.analysis.visualSummary.meaningfulImageCount}</strong>
@@ -1332,8 +1565,8 @@ function App() {
                 <article className="panel preview-panel">
                   <div className="subsection-heading">
                     <div>
-                      <p className="panel-kicker">Visual review</p>
-                      <h3>Rendered page capture</h3>
+                      <p className="panel-kicker">Evidence</p>
+                      <h3>Visual proof and rendered page review</h3>
                     </div>
                   </div>
                   {eeatResult.analysis.visualCapture?.available && eeatResult.analysis.visualCapture.screenshotDataUrl ? (
@@ -1370,8 +1603,8 @@ function App() {
                 <article className="panel preview-panel">
                   <div className="subsection-heading">
                     <div>
-                      <p className="panel-kicker">Answer block</p>
-                      <h3>Opening content preview</h3>
+                      <p className="panel-kicker">Opening copy</p>
+                      <h3>First-screen content preview</h3>
                     </div>
                   </div>
                   <div className="panel-subsection">
@@ -1414,6 +1647,10 @@ function App() {
                       <small>{eeatResult.analysis.pageSignals.contactLinkCount} unique About, Contact, Team, or location link(s) visible on the page</small>
                     </article>
                     <article className="setting-card">
+                      <span>Visible contact details</span>
+                      <small>{eeatResult.analysis.pageSignals.visibleContactDetailCount} visible phone, email, or address detail(s) detected in the page copy</small>
+                    </article>
+                    <article className="setting-card">
                       <span>Policy links on page</span>
                       <small>{eeatResult.analysis.pageSignals.policyLinkCount} unique Privacy, Terms, warranty, or policy link(s) visible on the page</small>
                     </article>
@@ -1435,10 +1672,10 @@ function App() {
                       </div>
                       <p>{eeatResult.analysis.formula.explanation}</p>
                     </article>
-                    {eeatResult.analysis.formula.categories.map((category) => (
+                    {eeatWeakestCategories.map((category) => (
                       <article key={category.id} className="finding-card severity-low">
                         <div className="finding-topline">
-                          <span>category</span>
+                          <span>watchlist</span>
                           <h4>{category.label}</h4>
                         </div>
                         <p>{category.earned} / {category.max} points</p>
@@ -1458,7 +1695,7 @@ function App() {
           {eeatResult ? (
             <section className="panel output-panel workspace-panel">
               <details className="disclosure-panel">
-                <summary>Detailed Signal Breakdown</summary>
+                <summary>Open full rubric and evidence breakdown</summary>
                 <div className="disclosure-body">
                   <div className="panel-heading">
                     <div>

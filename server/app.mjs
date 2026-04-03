@@ -5,6 +5,7 @@ import fs from 'node:fs'
 
 const app = express()
 const port = 4174
+app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_request, response) => {
   response.json({ ok: true })
@@ -75,8 +76,21 @@ app.get('/api/page-scan', async (request, response) => {
   }
 })
 
-app.get('/api/eeat-scan', async (request, response) => {
-  const targetUrl = String(request.query.url ?? '').trim()
+app.get('/api/gemini-status', (_request, response) => {
+  response.json({
+    availableFromEnv: Boolean(process.env.GEMINI_API_KEY),
+    recommendedConnectionMethod: 'api-key',
+    message: process.env.GEMINI_API_KEY
+      ? 'Gemini AI enhancement is built into this app instance. Users can switch it on with one click, and only need their own key later if the shared Gemini quota is exhausted.'
+      : 'Gemini AI enhancement is optional. To use it right now, add a Gemini API key for this session. In a hosted version, this can be powered by the app first and only fall back to user keys when shared limits are hit.',
+  })
+})
+
+async function handleEeatScan(request, response) {
+  const isPost = request.method === 'POST'
+  const targetUrl = String((isPost ? request.body?.url : request.query.url) ?? '').trim()
+  const useGemini = Boolean(isPost ? request.body?.useGemini : false)
+  const requestGeminiKey = String(isPost ? request.body?.geminiApiKey ?? '' : '').trim()
 
   if (!targetUrl) {
     response.status(400).json({ error: 'A url is required.' })
@@ -103,19 +117,36 @@ app.get('/api/eeat-scan', async (request, response) => {
       }),
     )
     const analysis = analyzeEeat({ page, visualCapture })
+    const geminiEnhancement = useGemini
+      ? await runGeminiEnhancement({
+          page,
+          analysis,
+          apiKey: requestGeminiKey || process.env.GEMINI_API_KEY || '',
+          apiKeySource: requestGeminiKey ? 'session' : (process.env.GEMINI_API_KEY ? 'server' : 'none'),
+        })
+      : {
+          provider: 'gemini',
+          enabled: false,
+          status: 'disabled',
+          message: 'Gemini AI enhancement is off. Turn it on in the UI if you want an AI second opinion.',
+        }
 
     response.json({
       url: parsedUrl.toString(),
       title: page.title,
       visualCapture,
       analysis,
+      geminiEnhancement,
     })
   } catch (error) {
     response.status(500).json({
       error: error instanceof Error ? error.message : 'Unexpected EEAT scan failure.',
     })
   }
-})
+}
+
+app.get('/api/eeat-scan', handleEeatScan)
+app.post('/api/eeat-scan', handleEeatScan)
 
 const server = app.listen(port, () => {
   console.log(`SEO analysis server listening on http://localhost:${port}`)
@@ -359,6 +390,7 @@ function analyzeEeat(input) {
     editorial: /(editorial|policy)/i,
     warranty: /(warranty|guarantee)/i,
   })
+  const visibleContactSignals = extractVisibleContactSignals(page.bodyText)
   const visualSummary = summarizePageVisuals(page.images, page.videos)
 
   const categories = [
@@ -371,7 +403,7 @@ function analyzeEeat(input) {
     detectPageIntent(page, firstWords),
     detectWritingQuality(page),
     detectReviewSignals(page),
-    detectContactVisibility(page, contactTrustLinks, contactTrustGroups),
+    detectContactVisibility(page, contactTrustLinks, contactTrustGroups, visibleContactSignals),
     detectPolicyVisibility(page, policyLegalLinks, policyLegalGroups),
     detectSchemaSignals({
       jsonLdBlocks: page.jsonLd,
@@ -436,27 +468,206 @@ function analyzeEeat(input) {
       headingCount: page.headings.length,
       contactLinkCount: contactTrustGroups.length,
       policyLinkCount: policyLegalGroups.length,
+      visibleContactDetailCount: visibleContactSignals.length,
       outboundLinkCount: outboundLinks.length,
       authoritativeOutboundLinkCount: outboundLinks.filter((link) => isAuthorityLink(link.resolved.hostname)).length,
     },
   }
 }
 
+async function runGeminiEnhancement({ page, analysis, apiKey, apiKeySource }) {
+  if (!apiKey) {
+    return {
+      provider: 'gemini',
+      enabled: true,
+      status: 'missing_key',
+      keySource: 'none',
+      model: 'gemini-2.5-flash',
+      message: 'Gemini AI enhancement was requested, but no Gemini API key is connected. Add a key in the app or configure GEMINI_API_KEY on the server.',
+    }
+  }
+
+  const prompt = [
+    'You are a strict SEO strategist reviewing page-level EEAT signals.',
+    'Use only the provided page data. Do not invent facts. If evidence is weak, say so clearly.',
+    'Treat the supplied rule-based audit as a baseline. Agree where it is fair, call out where it may be too generous or too harsh.',
+    '',
+    `URL: ${page.url}`,
+    `Title: ${page.title || 'None'}`,
+    `Meta description: ${page.metaDescription || 'None'}`,
+    `Headings: ${page.headings.slice(0, 12).join(' | ') || 'None'}`,
+    `Visible word count: ${analysis.pageSignals.wordCount}`,
+    `Visible contact detail count: ${analysis.pageSignals.visibleContactDetailCount}`,
+    `Policy link count: ${analysis.pageSignals.policyLinkCount}`,
+    `Authoritative outbound link count: ${analysis.pageSignals.authoritativeOutboundLinkCount}`,
+    `Rule-based EEAT score: ${analysis.score}/100`,
+    `Rule-based summary: ${analysis.summary}`,
+    '',
+    'Rule-based weakest categories:',
+    ...analysis.categories
+      .slice()
+      .sort((left, right) => (left.earned / left.max) - (right.earned / right.max))
+      .slice(0, 5)
+      .map((category) => `- ${category.label}: ${category.earned}/${category.max}. Findings: ${category.findings.join(' || ') || 'none'}. Gaps: ${category.gaps.join(' || ') || 'none'}. Recommendation: ${category.recommendation}`),
+    '',
+    'Opening content preview:',
+    analysis.firstWords || 'None',
+    '',
+    'Visible body excerpt:',
+    page.bodyText.slice(0, 5000),
+  ].join('\n')
+
+  try {
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              summary: { type: 'string', description: 'A short strategist-style summary of the page-level EEAT situation.' },
+              trustVerdict: { type: 'string', enum: ['supports', 'mixed', 'weak'], description: 'Whether the page visibly supports strong EEAT.' },
+              confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'How confident the model is in its assessment based only on supplied page evidence.' },
+              agreementWithRules: { type: 'string', description: 'Where the AI agrees with the rule-based audit.' },
+              overstatementRisk: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Cases where the current rule-based audit may be overstating trust or quality signals.',
+                maxItems: 4,
+              },
+              blindSpots: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Important concerns or nuances the rule-based audit may not fully capture.',
+                maxItems: 4,
+              },
+              refinedQuickWins: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string' },
+                    reason: { type: 'string' },
+                    action: { type: 'string' },
+                  },
+                  required: ['label', 'reason', 'action'],
+                },
+                minItems: 1,
+                maxItems: 5,
+              },
+            },
+            required: ['summary', 'trustVerdict', 'confidence', 'agreementWithRules', 'overstatementRisk', 'blindSpots', 'refinedQuickWins'],
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(25000),
+    })
+
+    if (!response.ok) {
+      const raw = await response.text().catch(() => '')
+      const lowered = raw.toLowerCase()
+
+      if (response.status === 429 || lowered.includes('resource_exhausted') || lowered.includes('quota')) {
+        return {
+          provider: 'gemini',
+          enabled: true,
+          status: 'rate_limited',
+          keySource: apiKeySource,
+          model: 'gemini-2.5-flash',
+          message: 'Gemini enhancement hit a rate limit or free-tier quota wall. Connect your own Gemini API key to keep using the AI-enhanced review.',
+        }
+      }
+
+      return {
+        provider: 'gemini',
+        enabled: true,
+        status: 'error',
+        keySource: apiKeySource,
+        model: 'gemini-2.5-flash',
+        message: `Gemini enhancement could not complete. ${extractGeminiErrorMessage(raw)}`,
+      }
+    }
+
+    const payload = await response.json()
+    const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('').trim() ?? ''
+    const parsed = JSON.parse(text)
+
+    return {
+      provider: 'gemini',
+      enabled: true,
+      status: 'applied',
+      keySource: apiKeySource,
+      model: 'gemini-2.5-flash',
+      message: apiKeySource === 'server'
+        ? 'Gemini AI enhancement used the server-configured API key.'
+        : 'Gemini AI enhancement used the session API key you provided.',
+      ...parsed,
+    }
+  } catch (error) {
+    return {
+      provider: 'gemini',
+      enabled: true,
+      status: 'error',
+      keySource: apiKeySource,
+      model: 'gemini-2.5-flash',
+      message: error instanceof Error
+        ? `Gemini enhancement could not complete. ${error.message}`
+        : 'Gemini enhancement could not complete.',
+    }
+  }
+}
+
+function extractGeminiErrorMessage(rawBody) {
+  try {
+    const parsed = JSON.parse(rawBody)
+    return parsed?.error?.message || 'Unexpected Gemini API error.'
+  } catch {
+    return rawBody || 'Unexpected Gemini API error.'
+  }
+}
+
 function detectAuthorSignals(page) {
-  const snippet = findSnippet(page.bodyText, /(written by|about the author|author bio|author profile|meet the author|reviewed by|by [A-Z][a-z]+ [A-Z][a-z]+|dr\. [A-Z][a-z]+|[A-Z][a-z]+, (phd|md|esq))/i)
+  const keywordSnippet = findSnippet(page.bodyText, /(written by|about the author|author bio|author profile|meet the author|reviewed by|reviewed and approved by|expert contributor)/i)
+  const namedAuthorSnippet = findSnippet(page.bodyText, /(written by|reviewed by|about the author|author bio|author profile|expert contributor)[^.!?\n]{0,120}([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})/i)
+  const credentialSnippet = findSnippet(page.bodyText, /(phd|md|esq|attorney|lawyer|licensed|certified|specialist|editor|founder|director)[^.!?\n]{0,120}/i)
   const socialLinks = page.links.filter((link) => /linkedin|x\.com|twitter|github|instagram|facebook/.test(link.href))
   let earned = 0
   const findings = []
   const gaps = []
 
-  if (snippet) {
-    earned += 8
-    findings.push(`Found author or credential language on the page: "${snippet}"`)
+  if (keywordSnippet) {
+    earned += 4
+    findings.push(`Found visible author/reviewer wording on the page: "${keywordSnippet}"`)
   } else {
-    gaps.push('No clear author name, bio, or credential block was found in the visible page copy.')
+    gaps.push('No explicit author, reviewer, or contributor block was found in the visible page copy.')
   }
 
-  if (snippet && socialLinks.length > 0) {
+  if (namedAuthorSnippet) {
+    earned += 4
+    findings.push(`Found a likely named person in that author/reviewer context: "${namedAuthorSnippet}"`)
+  } else {
+    gaps.push('No clearly named person was detected inside an author or reviewer context.')
+  }
+
+  if (credentialSnippet && namedAuthorSnippet) {
+    earned += 2
+    findings.push(`Found role or credential wording near the author context: "${credentialSnippet}"`)
+  } else {
+    gaps.push('No visible role, qualification, or expertise label was detected near a named author or reviewer.')
+  }
+
+  if (keywordSnippet && socialLinks.length > 0) {
     earned += Math.min(2, socialLinks.length)
     findings.push(`Found ${socialLinks.length} visible profile/social link(s) on the page.`)
   } else if (socialLinks.length === 0) {
@@ -468,19 +679,23 @@ function detectAuthorSignals(page) {
     label: 'Visible author credibility',
     max: 12,
     earned,
-    summary: snippet ? 'The page includes at least one visible author or credential signal.' : 'Author credibility is not clearly established on the page itself.',
+    summary: namedAuthorSnippet
+      ? 'The page shows some visible author or reviewer context, but the quality depends on whether credentials and accountability are explicit enough.'
+      : 'Author credibility is not clearly established on the page itself.',
     findings,
     gaps,
-    recommendation: snippet
+    recommendation: namedAuthorSnippet
       ? 'Make the author block more explicit with role, credentials, and why this author is qualified to write this page.'
       : 'Add a visible author section with name, credentials, role, and a short expertise summary directly on the page.',
-    evidenceIds: snippet ? ['author-credibility'] : [],
-    confidenceHint: snippet ? 'direct' : 'heuristic',
+    evidenceIds: keywordSnippet ? ['author-credibility'] : [],
+    confidenceHint: namedAuthorSnippet ? 'direct' : 'heuristic',
   })
 }
 
 function detectExperienceSignals(page, visualSummary) {
-  const firstHandSnippet = findSnippet(page.bodyText, /(case study|we tested|we found|our experience|from our work|we implemented|client results|real example|example from)/i)
+  const firstHandSnippet = findSnippet(page.bodyText, /(case study|we tested|we found|from our work|we installed|we implemented|our team completed|project example|client results|before and after|real example|example from)/i)
+  const quantifiedProofSnippet = findSnippet(page.bodyText, /(\d+\+?\s+(years|systems|projects|installations|clients|cases)|guarantee|licensed)/i)
+  const proofMediaCount = visualSummary.screenshotLikeImages + visualSummary.videoCount
   let earned = 0
   const findings = []
   const gaps = []
@@ -492,18 +707,18 @@ function detectExperienceSignals(page, visualSummary) {
     gaps.push('No clear first-hand, case-study, or tested-in-practice language was detected in the page copy.')
   }
 
-  if (visualSummary.meaningfulImageCount > 0) {
-    earned += Math.min(4, visualSummary.meaningfulImageCount * 2)
-    findings.push(`Detected ${visualSummary.meaningfulImageCount} meaningful image(s) that look more substantial than logos/icons.`)
+  if (quantifiedProofSnippet) {
+    earned += 3
+    findings.push(`Found quantified credibility or proof wording on the page: "${quantifiedProofSnippet}"`)
   } else {
-    gaps.push('No meaningful on-page images were detected beyond likely decorative assets.')
+    gaps.push('No quantified proof such as years, projects, systems, cases, or guarantees was detected in the visible copy.')
   }
 
-  if (visualSummary.videoCount > 0 || visualSummary.screenshotLikeImages > 0) {
-    earned += 2
-    findings.push(`Detected ${visualSummary.videoCount} video/embed(s) and ${visualSummary.screenshotLikeImages} screenshot-like image(s).`)
+  if (proofMediaCount > 0) {
+    earned += Math.min(3, proofMediaCount)
+    findings.push(`Detected ${visualSummary.videoCount} video/embed(s) and ${visualSummary.screenshotLikeImages} screenshot-like proof asset(s).`)
   } else {
-    gaps.push('No video embeds or screenshot-like proof assets were detected on the page.')
+    gaps.push('No screenshot-like proof assets or videos were detected on the page.')
   }
 
   return buildEeatCategory({
@@ -511,14 +726,14 @@ function detectExperienceSignals(page, visualSummary) {
     label: 'Demonstrated first-hand experience',
     max: 12,
     earned,
-    summary: firstHandSnippet || visualSummary.meaningfulImageCount > 0
-      ? 'The page shows some evidence of experience, but the proof strength depends on how explicit those examples are.'
+    summary: firstHandSnippet || quantifiedProofSnippet || proofMediaCount > 0
+      ? 'The page shows some signals of hands-on experience, but the proof is only strong when the examples are explicit and verifiable.'
       : 'The page reads more like general advice than demonstrated first-hand experience.',
     findings,
     gaps,
     recommendation: 'Add concrete proof of experience on the page such as original screenshots, before/after examples, case-study blocks, or clearly stated outcomes from real work.',
     evidenceIds: firstHandSnippet ? ['first-hand-experience'] : [],
-    confidenceHint: firstHandSnippet ? 'direct' : 'mixed',
+    confidenceHint: firstHandSnippet && proofMediaCount > 0 ? 'direct' : 'heuristic',
   })
 }
 
@@ -813,10 +1028,7 @@ function detectReviewSignals(page) {
   })
 }
 
-function detectContactVisibility(page, contactLinks, contactGroups) {
-  const emailSnippet = findSnippet(page.bodyText, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
-  const phoneSnippet = findSnippet(page.bodyText, /(?:\+\d{1,2}\s?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3}[\s.-]?\d{3,4}/i)
-  const addressSnippet = findSnippet(page.bodyText, /\b\d{1,4}\s+[A-Za-z0-9.'-]+\s+(street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd)\b/i)
+function detectContactVisibility(page, contactLinks, contactGroups, visibleContactSignals) {
   let earned = 0
   const findings = []
   const gaps = []
@@ -828,9 +1040,9 @@ function detectContactVisibility(page, contactLinks, contactGroups) {
     gaps.push('No clear About, Contact, Team, or location links were detected on the page.')
   }
 
-  if (emailSnippet || phoneSnippet || addressSnippet) {
+  if (visibleContactSignals.length > 0) {
     earned += 4
-    findings.push(`Visible contact detail detected on the page: "${emailSnippet ?? phoneSnippet ?? addressSnippet}"`)
+    findings.push(`Visible contact details detected on the page: ${visibleContactSignals.join(', ')}.`)
   } else {
     gaps.push('No visible email address, phone number, or physical address was detected in the page copy.')
   }
@@ -845,13 +1057,14 @@ function detectContactVisibility(page, contactLinks, contactGroups) {
       : 'The page does not make contact and business-presence signals visible enough on-page.',
     findings,
     gaps,
-    recommendation: 'Expose trust signals more clearly on the page with visible contact details and clearer About, Contact, Team, or location links near key conversion points.',
-    evidenceIds: contactGroups.length > 0 || emailSnippet || phoneSnippet || addressSnippet ? ['transparency-safety'] : [],
-    confidenceHint: contactGroups.length > 0 || emailSnippet || phoneSnippet || addressSnippet ? 'direct' : 'mixed',
+      recommendation: 'Expose trust signals more clearly on the page with visible contact details and clearer About, Contact, Team, or location links near key conversion points.',
+      evidenceIds: contactGroups.length > 0 || visibleContactSignals.length > 0 ? ['contact-details'] : [],
+      confidenceHint: contactGroups.length > 0 || visibleContactSignals.length > 0 ? 'direct' : 'mixed',
   })
 }
 
 function detectPolicyVisibility(page, policyLinks, policyGroups) {
+  const visiblePolicySnippet = findSnippet(page.bodyText, /(privacy policy|terms and conditions|editorial policy|returns policy|warranty|guarantee)/i)
   let earned = 0
   const findings = []
   const gaps = []
@@ -863,18 +1076,24 @@ function detectPolicyVisibility(page, policyLinks, policyGroups) {
     gaps.push('No clear Privacy, Terms, Policy, warranty, guarantee, or Editorial links were detected on the page.')
   }
 
+  if (visiblePolicySnippet) {
+    earned += 1
+    findings.push(`Found visible policy or warranty wording on the page: "${visiblePolicySnippet}"`)
+  }
+
   return buildEeatCategory({
     id: 'policy-legal-visibility',
     label: 'Policy and legal visibility',
     max: 6,
     earned,
-    summary: earned >= 4
-      ? 'The page exposes at least some policy, legal, or warranty signals.'
-      : 'The page does not make policy, legal, or warranty signals visible enough on-page.',
-    findings,
-    gaps,
-    recommendation: 'Add clearly labeled Privacy, Terms, warranty, guarantee, or editorial-policy links where they can be discovered from this page without hunting through repeated navigation.',
-    confidenceHint: policyGroups.length > 0 ? 'direct' : 'heuristic',
+      summary: earned >= 4
+        ? 'The page exposes at least some policy, legal, or warranty signals.'
+        : 'The page does not make policy, legal, or warranty signals visible enough on-page.',
+      findings,
+      gaps,
+      recommendation: 'Add clearly labeled Privacy, Terms, warranty, guarantee, or editorial-policy links where they can be discovered from this page without hunting through repeated navigation.',
+      evidenceIds: visiblePolicySnippet ? ['policy-legal'] : [],
+      confidenceHint: policyGroups.length > 0 || visiblePolicySnippet ? 'direct' : 'heuristic',
   })
 }
 
@@ -1158,6 +1377,28 @@ function findSnippet(text, regex) {
   return source.slice(start, end).trim()
 }
 
+function extractVisibleContactSignals(text) {
+  const source = String(text ?? '').replace(/\s+/g, ' ').trim()
+  const signals = []
+
+  const emailMatch = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  if (emailMatch) {
+    signals.push(`email (${emailMatch[0]})`)
+  }
+
+  const phoneMatch = source.match(/(?:\+\d{1,2}\s?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3}[\s.-]?\d{3,4}/i)
+  if (phoneMatch) {
+    signals.push(`phone (${phoneMatch[0]})`)
+  }
+
+  const addressMatch = source.match(/\b\d{1,4}\s+[A-Za-z0-9.'-]+\s+(street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd)\b/i)
+  if (addressMatch) {
+    signals.push(`address (${addressMatch[0]})`)
+  }
+
+  return signals
+}
+
 function dedupeResolvedLinks(links) {
   const seen = new Set()
 
@@ -1287,15 +1528,23 @@ async function captureEvidenceBlocks(page) {
       ],
       note: 'Focused crop used to verify review or validation language directly on the page.',
     },
-    {
-      id: 'transparency-safety',
-      label: 'Contact or trust signal block',
-      selectors: [
-        'text=/contact|privacy|terms|about us|about|editorial|team|@|street|road|avenue|phone/i',
-      ],
-      note: 'Focused crop used to verify visible contact, address, or trust-navigation signals on the page.',
-    },
-  ]
+      {
+        id: 'contact-details',
+        label: 'Contact details block',
+        selectors: [
+          'text=/contact|about us|about|team|@|street|road|avenue|phone|call/i',
+        ],
+        note: 'Focused crop used to verify visible contact details, location details, or direct trust-contact signals on the page.',
+      },
+      {
+        id: 'policy-legal',
+        label: 'Policy or warranty block',
+        selectors: [
+          'text=/privacy|terms|conditions|editorial|warranty|guarantee/i',
+        ],
+        note: 'Focused crop used to verify visible policy, legal, warranty, or guarantee wording directly on the page.',
+      },
+    ]
 
   for (const block of targetedBlocks) {
     const captured = await captureEvidenceBlock(page, block)

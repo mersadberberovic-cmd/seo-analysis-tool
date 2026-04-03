@@ -99,6 +99,20 @@
   gap: 12px;
 }
 
+.feature-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid #cfe5d8;
+  background: #f3fbf6;
+  color: #176443;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .hero-shell,
 .panel {
   border: 1px solid #dce7df;
@@ -313,6 +327,71 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.signal-snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 4px;
+}
+
+.signal-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid #dde8e0;
+  background: #f8fbf9;
+}
+
+.signal-card span,
+.signal-card strong {
+  margin: 0;
+}
+
+.signal-card span {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.signal-card strong {
+  font-size: 1rem;
+  color: #101815;
+}
+
+.signal-card small {
+  color: #5d6b64;
+  line-height: 1.45;
+}
+
+.signal-found {
+  border-color: #b9dfca;
+  background: #f3fbf6;
+}
+
+.signal-found span {
+  color: #176443;
+}
+
+.signal-partial {
+  border-color: #ebd7a8;
+  background: #fffaf0;
+}
+
+.signal-partial span {
+  color: #9f6a12;
+}
+
+.signal-missing {
+  border-color: #edd3cb;
+  background: #fff6f2;
+}
+
+.signal-missing span {
+  color: #a13a23;
+}
+
 .eeat-card {
   align-content: start;
 }
@@ -323,6 +402,10 @@
 
 .eeat-action-plan {
   margin-top: 8px;
+}
+
+.eeat-hero-metrics {
+  margin-top: 6px;
 }
 
 .eeat-visual-wrap {
@@ -755,7 +838,8 @@ button:disabled {
   .overview-grid,
   .metric-grid,
   .dashboard-list,
-  .scan-grid {
+  .scan-grid,
+  .signal-snapshot-grid {
     grid-template-columns: 1fr;
   }
 
