@@ -7,6 +7,7 @@
     "dev": "concurrently \"node server/app.mjs\" \"vite\"",
     "dev:client": "vite",
     "dev:server": "node server/app.mjs",
+    "migrate:answer-visibility": "node server/migrations/001-init-answer-visibility.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

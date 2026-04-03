@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import * as XLSX from 'xlsx'
 import './App.css'
+import { AnswerVisibilityTracker } from './features/AnswerVisibilityTracker'
 
 type Severity = 'high' | 'medium' | 'low'
 type RankingStrategy = 'second-page-first' | 'second-page-only' | 'below-page-two'
@@ -13,6 +14,7 @@ type CannibalizationRisk = 'none' | 'medium' | 'high'
 type Intent = 'commercial' | 'informational' | 'navigational' | 'mixed'
 type PageType = 'service' | 'blog' | 'category' | 'homepage' | 'general'
 type RecentOptimizationMode = 'exclude' | 'deprioritize'
+type OnpageDashboardTab = 'overview' | 'opportunities' | 'signals'
 
 type Finding = {
   id: string
@@ -89,7 +91,7 @@ type PageScanResponse = {
   }
 }
 
-type ToolId = 'onpage' | 'eeat'
+type ToolId = 'onpage' | 'eeat' | 'answer-visibility'
 type EeatConfidence = 'high' | 'medium' | 'low'
 
 type EeatEvidenceBlock = {
@@ -326,6 +328,7 @@ const overrideOptions: Array<{ value: OverrideChoice; label: string }> = [
 function App() {
   const [activeTool, setActiveTool] = useState<ToolId>('onpage')
   const [currentView, setCurrentView] = useState<'dashboard' | 'opportunities'>('dashboard')
+  const [onpageDashboardTab, setOnpageDashboardTab] = useState<OnpageDashboardTab>('overview')
   const [settings, setSettings] = useState<AnalysisSettings>(defaultSettings)
   const [uploadedRows, setUploadedRows] = useState<RowRecord[]>([])
   const [fileName, setFileName] = useState('')
@@ -413,6 +416,15 @@ function App() {
   const displayedScanScore = scanResult ? applyOverride(scanResult.analysis.score, scanOverride) : 0
   const dashboardOpportunities = displayedOpportunities.slice(0, 6)
   const previewOpportunities = displayedOpportunities.slice(0, 3)
+  const onpageScoreBars = useMemo(() => {
+    if (!report) return []
+
+    return displayedOpportunities.slice(0, 6).map((opportunity) => ({
+      id: opportunity.id,
+      label: opportunity.keyword ?? opportunity.url,
+      score: opportunity.displayScore,
+    }))
+  }, [displayedOpportunities, report])
 
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -703,44 +715,259 @@ function App() {
     }
     return geminiStatus?.message ?? 'Gemini enhancement is available when configured.'
   }, [eeatResult, geminiStatus])
+  const workspaceSections = useMemo(() => {
+    if (activeTool === 'onpage') {
+      if (currentView === 'dashboard') {
+        return [
+          {
+            title: 'Planning',
+            links: [
+              { label: 'Upload and review', id: 'onpage-upload' },
+              { label: 'Top opportunities', id: 'onpage-shortlist' },
+              { label: 'Detected columns', id: 'onpage-columns' },
+            ],
+          },
+          {
+            title: 'Controls',
+            links: [
+              { label: 'Analysis controls', id: 'onpage-controls' },
+              { label: 'Live page scan', id: 'onpage-live-scan' },
+            ],
+          },
+        ]
+      }
+
+      return [
+        {
+          title: 'Workspace',
+          links: [
+            { label: 'Detected columns', id: 'onpage-workspace-columns' },
+            { label: 'Opportunity dashboard', id: 'onpage-workspace-dashboard' },
+            { label: 'Top opportunities', id: 'onpage-workspace-table' },
+            { label: 'Findings', id: 'onpage-workspace-findings' },
+          ],
+        },
+      ]
+    }
+
+    if (activeTool === 'answer-visibility') {
+      return [
+        {
+          title: 'Visibility',
+          links: [
+            { label: 'Prompt input', id: 'answer-visibility-root' },
+            { label: 'Summary', id: 'answer-visibility-summary' },
+            { label: 'Results table', id: 'answer-visibility-table' },
+          ],
+        },
+        {
+          title: 'Controls',
+          links: [
+            { label: 'Filters', id: 'answer-visibility-filters' },
+            { label: 'Campaign context', id: 'answer-visibility-context' },
+          ],
+        },
+      ]
+    }
+
+    return [
+      {
+        title: 'EEAT Review',
+        links: [
+          { label: 'Overview', id: 'eeat-overview' },
+          { label: 'Top 5 quick wins', id: 'eeat-quick-wins' },
+          { label: 'Visual evidence', id: 'eeat-visual-proof' },
+          { label: 'Detailed rubric', id: 'eeat-rubric' },
+        ],
+      },
+      {
+        title: 'AI Layer',
+        links: geminiStatus?.availableFromEnv
+          ? [
+            { label: 'Page details', id: 'eeat-page-details' },
+            { label: 'Score formula', id: 'eeat-formula' },
+            { label: 'Gemini built in', id: 'eeat-overview' },
+          ]
+          : [
+            { label: 'Page details', id: 'eeat-page-details' },
+            { label: 'Score formula', id: 'eeat-formula' },
+            { label: 'Batch review', id: 'eeat-batch-panel' },
+        ],
+      },
+    ]
+  }, [activeTool, currentView, geminiStatus])
+  const workspaceFilters = useMemo(() => {
+    if (activeTool === 'onpage') {
+      return [
+        `Min volume ${settings.minimumSearchVolume}+`,
+        settings.strategy === 'second-page-first'
+          ? 'Second page first'
+          : settings.strategy === 'second-page-only'
+            ? 'Second page only'
+            : 'Below page 2 only',
+        usedOpportunityFileName ? 'History linked' : 'No history file',
+        report ? `${report.opportunities.length} opportunities` : 'Awaiting sheet',
+      ]
+    }
+
+    if (activeTool === 'answer-visibility') {
+      return [
+        'Answer presence',
+        'Citation presence',
+        'Mention share',
+        'Historical runs',
+      ]
+    }
+
+    return [
+      'Page-level audit',
+      useGeminiEnhancement ? 'Gemini review on' : 'Gemini review off',
+      eeatResult ? `${eeatResult.analysis.categories.length} criteria scored` : 'Awaiting URL',
+      geminiStatus?.availableFromEnv ? 'Built-in AI ready' : 'Manual Gemini fallback',
+    ]
+  }, [activeTool, settings.minimumSearchVolume, settings.strategy, usedOpportunityFileName, report, useGeminiEnhancement, eeatResult, geminiStatus])
 
   return (
-    <main className="app-shell app-layout">
-      <aside className="tool-sidebar panel">
+    <main className="app-shell">
+      <header className="product-header app-header">
+        <div className="product-brand">
+          <div className="brand-mark">S</div>
+          <div>
+            <strong className="product-title">SEO Opportunity Finder</strong>
+            <p className="product-subtitle">Custom planning and EEAT workflows</p>
+          </div>
+        </div>
+        <div className="quick-inspect-bar">
+          <input
+            type="url"
+            placeholder="Paste a page URL to inspect"
+            value={eeatUrl}
+            onChange={(event) => setEeatUrl(event.target.value)}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTool('eeat')
+              if (eeatUrl.trim()) {
+                void runEeatScan(eeatUrl)
+              }
+            }}
+          >
+            {activeTool === 'eeat' ? 'Run page review' : 'Inspect page'}
+          </button>
+        </div>
+        <nav className="product-nav" aria-label="Primary navigation">
+          <button
+            type="button"
+            className={`product-nav-link ${activeTool === 'onpage' && currentView === 'dashboard' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTool('onpage')
+              setCurrentView('dashboard')
+            }}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
+            className={`product-nav-link ${activeTool === 'onpage' && currentView === 'opportunities' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTool('onpage')
+              setCurrentView('opportunities')
+            }}
+          >
+            Workspace
+          </button>
+            <button
+              type="button"
+              className={`product-nav-link ${activeTool === 'answer-visibility' ? 'active' : ''}`}
+              onClick={() => setActiveTool('answer-visibility')}
+            >
+              Reports
+            </button>
+          <button type="button" className="product-nav-link">
+            Settings
+          </button>
+        </nav>
+      </header>
+
+      <section className="app-layout">
+      <aside className="tool-sidebar">
         <div>
           <p className="eyebrow">SEO Opportunity Finder</p>
-          <h2 className="sidebar-title">Tools</h2>
+          <h2 className="sidebar-title">Features</h2>
         </div>
         <div className="tool-nav">
           <button
             type="button"
-            className={`tool-nav-button ${activeTool === 'onpage' ? 'active' : ''}`}
-            onClick={() => setActiveTool('onpage')}
+            className={`tool-nav-button tool-nav-linklike ${activeTool === 'onpage' && currentView === 'dashboard' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTool('onpage')
+              setCurrentView('dashboard')
+            }}
           >
-            <span>Onpage Optimization Planning Tool</span>
-            <small>Prioritize URLs and optimization opportunities from exports.</small>
+            <span>Main dashboard</span>
+            <small>Overview and upload workspace</small>
           </button>
           <button
             type="button"
-            className={`tool-nav-button ${activeTool === 'eeat' ? 'active' : ''}`}
+            className={`tool-nav-button tool-nav-linklike ${activeTool === 'onpage' ? 'active' : ''}`}
+            onClick={() => setActiveTool('onpage')}
+          >
+            <span>Onpage Optimization Planning Tool</span>
+            <small>Prioritize URLs from exports</small>
+          </button>
+          <button
+            type="button"
+            className={`tool-nav-button tool-nav-linklike ${activeTool === 'eeat' ? 'active' : ''}`}
             onClick={() => setActiveTool('eeat')}
           >
             <span>EEAT Tool</span>
-            <small>Scan a page for experience, expertise, authority, and trust signals.</small>
+            <small>Review one page deeply</small>
           </button>
+          <button
+            type="button"
+            className={`tool-nav-button tool-nav-linklike ${activeTool === 'answer-visibility' ? 'active' : ''}`}
+            onClick={() => setActiveTool('answer-visibility')}
+          >
+            <span>AI Answer Visibility Tracker</span>
+            <small>Track brand visibility in AI answers</small>
+          </button>
+        </div>
+        <div className="tool-sidebar-sections">
+          {workspaceSections.map((section) => (
+            <div key={section.title} className="tool-sidebar-group">
+              <p className="tool-sidebar-group-title">{section.title}</p>
+              <div className="tool-sidebar-links">
+                {section.links.map((link, index) => (
+                  <a key={`${section.title}-${link.id}`} href={`#${link.id}`} className={`tool-sidebar-link ${index === 0 ? 'active' : ''}`}>
+                    {link.label}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </aside>
 
       <div className="tool-content">
-          <header className="topbar">
+
+        <header className="topbar">
             <div>
-              <p className="eyebrow">{activeTool === 'onpage' ? 'Onpage Optimization Planning Tool' : 'EEAT Tool'}</p>
+              <p className="eyebrow">
+                {activeTool === 'onpage'
+                  ? 'Onpage Optimization Planning Tool'
+                  : activeTool === 'eeat'
+                    ? 'EEAT Tool'
+                    : 'AI Answer Visibility Tracker'}
+              </p>
               <h1 className="topbar-title">
                 {activeTool === 'onpage'
                 ? currentView === 'dashboard'
                   ? 'Main dashboard'
                   : 'Opportunity workspace'
-                  : 'Page-level EEAT analysis'}
+                  : activeTool === 'eeat'
+                    ? 'Page-level EEAT analysis'
+                    : 'AI Answer Visibility Tracker'}
               </h1>
             </div>
             {activeTool === 'eeat' && geminiStatus?.availableFromEnv ? (
@@ -763,11 +990,38 @@ function App() {
           ) : null}
         </header>
 
+        <section className="workspace-toolbar panel">
+          <div className="workspace-status">
+            <strong>
+              {activeTool === 'onpage'
+                ? 'Planning workspace'
+                : activeTool === 'eeat'
+                  ? 'EEAT workspace'
+                  : 'AI answer visibility workspace'}
+            </strong>
+            <p>
+              {activeTool === 'onpage'
+                ? 'The center canvas holds results, while the rails keep inputs and navigation easy to reach.'
+                : activeTool === 'eeat'
+                  ? 'Review one page at a time with a cleaner audit shell, visual proof, and optional AI enhancement.'
+                  : 'Track how your brand, competitors, and cited domains appear across AI-generated answers and preserve every run historically.'}
+            </p>
+          </div>
+          <div className="workspace-filters">
+            {workspaceFilters.map((filter) => (
+              <span key={filter} className="workspace-chip">{filter}</span>
+            ))}
+          </div>
+        </section>
+
+        <section className="workspace-shell">
+          <div className="workspace-main">
+
         {activeTool === 'onpage' ? (
         <>
         {currentView === 'dashboard' ? (
         <>
-          <section className="panel toolbar-panel">
+          <section id="onpage-upload" className="panel toolbar-panel compact-toolbar-panel">
             <div className="toolbar-row">
               <div>
                 <p className="panel-kicker">Workspace</p>
@@ -801,98 +1055,294 @@ function App() {
             <div className="dashboard-main">
               {report ? (
                 <>
-                  <article className="panel output-panel preview-panel">
-                    <div className="report-hero">
-                      <div>
-                        <p className="report-source">{report.sourceLabel}</p>
-                        <h3>{report.summary}</h3>
+                  <article className="panel output-panel preview-panel dashboard-overview-panel">
+                    <div className="dashboard-overview-band">
+                      <div className="report-hero dashboard-overview-hero">
+                        <div>
+                          <p className="report-source">{report.sourceLabel}</p>
+                          <h3>{report.summary}</h3>
+                        </div>
+                        <div className="score-badge">
+                          <span>Opportunity score</span>
+                          <strong>{displayedReportScore}</strong>
+                        </div>
                       </div>
-                      <div className="score-badge">
-                        <span>Opportunity score</span>
-                        <strong>{displayedReportScore}</strong>
-                      </div>
-                    </div>
 
-                    <div className="metric-grid">
-                      {report.metrics.map((metric) => (
-                        <article key={metric.label} className="metric-card">
-                          <span>{metric.label}</span>
-                          <strong>{metric.value}</strong>
-                          <small>{metric.hint}</small>
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-
-                  <article className="panel preview-panel">
-                    <div className="subsection-heading">
-                      <div>
-                        <p className="panel-kicker">Results</p>
-                        <h3>Top opportunities</h3>
-                      </div>
-                      <button type="button" className="secondary-button" onClick={() => setCurrentView('opportunities')}>
-                        Full workspace
-                      </button>
-                    </div>
-
-                    {previewOpportunities.length > 0 ? (
-                      <div className="dashboard-list preview-list">
-                        {previewOpportunities.map((opportunity) => (
-                          <article key={`preview-${opportunity.id}`} className="dashboard-card compact-card">
-                            <div className="dashboard-header">
-                              <div>
-                                <span className="dashboard-score">{opportunity.displayScore}</span>
-                                <h4>{opportunity.keyword ?? 'Untitled opportunity'}</h4>
-                              </div>
-                              <div className="card-pill-stack">
-                                {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recently optimized</span> : null}
-                                <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
-                                  {opportunity.cannibalizationRisk}
-                                </span>
-                              </div>
-                            </div>
-                            <p className="dashboard-url">{opportunity.url}</p>
-                            <p className="dashboard-reason">{opportunity.reason}</p>
-                            <div className="dashboard-meta">
-                              <span>Rank {opportunity.ranking}</span>
-                              <span>Volume {opportunity.searchVolume}</span>
-                              <span>{opportunity.inferredIntent} intent</span>
-                            </div>
+                      <div className="metric-grid metric-grid-compact">
+                        {report.metrics.map((metric) => (
+                          <article key={metric.label} className="metric-card metric-card-compact">
+                            <span>{metric.label}</span>
+                            <strong>{metric.value}</strong>
+                            <small>{metric.hint}</small>
                           </article>
                         ))}
                       </div>
-                    ) : (
-                      <div className="empty-state">
-                        <p>No opportunities are ready yet for preview.</p>
-                      </div>
-                    )}
+                    </div>
                   </article>
 
-                  <article className="panel preview-panel">
+                  <section className="panel dashboard-tabs-panel">
+                    <div className="dashboard-tabs">
+                      <button
+                        type="button"
+                        className={`dashboard-tab ${onpageDashboardTab === 'overview' ? 'active' : ''}`}
+                        onClick={() => setOnpageDashboardTab('overview')}
+                      >
+                        Overview
+                      </button>
+                      <button
+                        type="button"
+                        className={`dashboard-tab ${onpageDashboardTab === 'opportunities' ? 'active' : ''}`}
+                        onClick={() => setOnpageDashboardTab('opportunities')}
+                      >
+                        Opportunities
+                      </button>
+                      <button
+                        type="button"
+                        className={`dashboard-tab ${onpageDashboardTab === 'signals' ? 'active' : ''}`}
+                        onClick={() => setOnpageDashboardTab('signals')}
+                      >
+                        Signals
+                      </button>
+                    </div>
+
+                    {onpageDashboardTab === 'overview' ? (
+                      <section className="dashboard-module-grid">
+                        <article id="onpage-shortlist" className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Results</p>
+                              <h3>Top opportunities</h3>
+                            </div>
+                            <button type="button" className="secondary-button" onClick={() => setCurrentView('opportunities')}>
+                              Full workspace
+                            </button>
+                          </div>
+
+                          {previewOpportunities.length > 0 ? (
+                            <div className="dashboard-list preview-list">
+                              {previewOpportunities.map((opportunity) => (
+                                <article key={`preview-${opportunity.id}`} className="dashboard-card compact-card">
+                                  <div className="dashboard-header">
+                                    <div>
+                                      <span className="dashboard-score">{opportunity.displayScore}</span>
+                                      <h4>{opportunity.keyword ?? 'Untitled opportunity'}</h4>
+                                    </div>
+                                    <div className="card-pill-stack">
+                                      {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recently optimized</span> : null}
+                                      <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
+                                        {opportunity.cannibalizationRisk}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <p className="dashboard-url">{opportunity.url}</p>
+                                  <p className="dashboard-reason">{opportunity.reason}</p>
+                                  <div className="dashboard-meta">
+                                    <span>Rank {opportunity.ranking}</span>
+                                    <span>Volume {opportunity.searchVolume}</span>
+                                    <span>{opportunity.inferredIntent} intent</span>
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="empty-state">
+                              <p>No opportunities are ready yet for preview.</p>
+                            </div>
+                          )}
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Distribution</p>
+                              <h3>Priority score spread</h3>
+                            </div>
+                          </div>
+                          <div className="score-chart">
+                            {onpageScoreBars.map((item) => (
+                              <div key={item.id} className="score-bar-row">
+                                <div className="score-bar-meta">
+                                  <strong>{item.label}</strong>
+                                  <span>{item.score}</span>
+                                </div>
+                                <div className="score-bar-track">
+                                  <div className="score-bar-fill" style={{ width: `${Math.max(8, Math.min(100, item.score))}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Review queue</p>
+                              <h3>Current decision mix</h3>
+                            </div>
+                          </div>
+                          <div className="metric-grid compact-metric-grid">
+                            <article className="metric-card metric-card-compact">
+                              <span>Approved</span>
+                              <strong>{displayedOpportunities.filter((item) => item.reviewStatus === 'approved').length}</strong>
+                              <small>Ready for action</small>
+                            </article>
+                            <article className="metric-card metric-card-compact">
+                              <span>Pending</span>
+                              <strong>{displayedOpportunities.filter((item) => item.reviewStatus === 'pending').length}</strong>
+                              <small>Still to review</small>
+                            </article>
+                            <article className="metric-card metric-card-compact">
+                              <span>Rejected</span>
+                              <strong>{Object.values(reviewStatuses).filter((status) => status === 'rejected').length}</strong>
+                              <small>Hidden from shortlist</small>
+                            </article>
+                          </div>
+                        </article>
+                      </section>
+                    ) : null}
+
+                    {onpageDashboardTab === 'opportunities' ? (
+                      <section className="dashboard-module-grid">
+                        <article id="onpage-shortlist" className="panel preview-panel dashboard-module-panel dashboard-module-wide">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Results</p>
+                              <h3>Shortlisted opportunities</h3>
+                            </div>
+                            <button type="button" className="secondary-button" onClick={() => setCurrentView('opportunities')}>
+                              Open full workspace
+                            </button>
+                          </div>
+                          <div className="dashboard-list">
+                            {dashboardOpportunities.map((opportunity) => (
+                              <article key={`tab-${opportunity.id}`} className="dashboard-card">
+                                <div className="dashboard-header">
+                                  <div>
+                                    <span className="dashboard-score">{opportunity.displayScore}</span>
+                                    <h4>{opportunity.keyword ?? 'Untitled opportunity'}</h4>
+                                  </div>
+                                  <div className="card-pill-stack">
+                                    {opportunity.recentlyOptimized ? <span className="risk-pill risk-recent">recently optimized</span> : null}
+                                    <span className={`risk-pill risk-${opportunity.cannibalizationRisk}`}>
+                                      {opportunity.cannibalizationRisk}
+                                    </span>
+                                  </div>
+                                </div>
+                                <p className="dashboard-url">{opportunity.url}</p>
+                                <p className="dashboard-reason">{opportunity.reason}</p>
+                                <div className="dashboard-meta">
+                                  <span>Rank {opportunity.ranking}</span>
+                                  <span>Volume {opportunity.searchVolume}</span>
+                                  <span>{opportunity.inferredIntent}</span>
+                                  <span>{opportunity.inferredPageType}</span>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        </article>
+                      </section>
+                    ) : null}
+
+                    {onpageDashboardTab === 'signals' ? (
+                      <section className="dashboard-module-grid">
+                        <article id="onpage-columns" className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Signals</p>
+                              <h3>Detected columns</h3>
+                            </div>
+                          </div>
+                          <div className="chip-list compact-chip-list">
+                            {report.detectedColumns.map((column) => (
+                              <span key={column.field} className={`column-chip ${column.header ? 'found' : 'missing'}`}>
+                                {column.field}: {column.header ?? 'not found'}
+                              </span>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Findings</p>
+                              <h3>What the engine is seeing</h3>
+                            </div>
+                          </div>
+                          <div className="findings-list compact-findings">
+                            {report.findings.slice(0, 4).map((finding) => (
+                              <article key={finding.id} className={`finding-card severity-${finding.severity}`}>
+                                <div className="finding-topline">
+                                  <span>{finding.severity} priority</span>
+                                  <h4>{finding.title}</h4>
+                                </div>
+                                <p>{finding.detail}</p>
+                              </article>
+                            ))}
+                          </div>
+                        </article>
+                      </section>
+                    ) : null}
+                  </section>
+                </>
+              ) : (
+                <section className="dashboard-module-grid starter-dashboard-grid">
+                  <article className="panel preview-panel dashboard-module-panel">
                     <div className="subsection-heading">
                       <div>
-                        <p className="panel-kicker">Signals</p>
-                        <h3>Detected columns</h3>
+                        <p className="panel-kicker">Starter view</p>
+                        <h3>What this dashboard will surface</h3>
                       </div>
                     </div>
-                    <div className="chip-list">
-                      {report.detectedColumns.map((column) => (
-                        <span key={column.field} className={`column-chip ${column.header ? 'found' : 'missing'}`}>
-                          {column.field}: {column.header ?? 'not found'}
-                        </span>
+                    <div className="findings-list compact-findings">
+                      <article className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>opportunity logic</span>
+                          <h4>Second-page keywords with enough search volume</h4>
+                        </div>
+                        <p>We prioritize URLs ranking on page two, then fall back to lower rankings if there are no stronger options.</p>
+                      </article>
+                      <article className="finding-card severity-low">
+                        <div className="finding-topline">
+                          <span>cross-checks</span>
+                          <h4>History, cannibalization, and low-value URLs</h4>
+                        </div>
+                        <p>The tool filters faceted or archive URLs, checks for recently optimized rows, and flags competing pages.</p>
+                      </article>
+                    </div>
+                  </article>
+
+                  <article className="panel preview-panel dashboard-module-panel">
+                    <div className="subsection-heading">
+                      <div>
+                        <p className="panel-kicker">Preview</p>
+                        <h3>How the workspace fills out</h3>
+                      </div>
+                    </div>
+                    <div className="score-chart">
+                      {[
+                        ['Second-page candidates', 82],
+                        ['Below-page-two fallback', 56],
+                        ['Cannibalization review', 38],
+                        ['Recently optimized filter', 26],
+                      ].map(([label, score]) => (
+                        <div key={label} className="score-bar-row">
+                          <div className="score-bar-meta">
+                            <strong>{label}</strong>
+                            <span>{score}</span>
+                          </div>
+                          <div className="score-bar-track">
+                            <div className="score-bar-fill" style={{ width: `${score}%` }} />
+                          </div>
+                        </div>
                       ))}
                     </div>
                   </article>
-                </>
-              ) : (
-                <section className="panel empty-state center-empty">
-                  <p>Upload a spreadsheet to generate your first opportunity list.</p>
                 </section>
               )}
             </div>
 
             <aside className="dashboard-rail">
-              <section className="panel rail-panel">
+              <section id="onpage-controls" className="panel rail-panel">
                 <div className="subsection-heading">
                   <div>
                     <p className="panel-kicker">Right rail</p>
@@ -1007,7 +1457,7 @@ function App() {
                 ) : null}
               </section>
 
-              <section className="panel rail-panel">
+              <section id="onpage-live-scan" className="panel rail-panel">
                 <div className="subsection-heading">
                   <div>
                     <p className="panel-kicker">Page check</p>
@@ -1072,7 +1522,7 @@ function App() {
 
           {report ? (
             <div className="report-stack">
-              <div className="detected-columns panel-subsection">
+              <div id="onpage-workspace-columns" className="detected-columns panel-subsection">
                 <div className="subsection-heading">
                   <h3>Detected columns</h3>
                   <p>The app tries to understand varied column names automatically.</p>
@@ -1086,7 +1536,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="panel-subsection">
+              <div id="onpage-workspace-dashboard" className="panel-subsection">
                 <div className="subsection-heading">
                   <h3>Opportunity Dashboard</h3>
                   <p>Shortlist first, review in context, and only export later if you want it.</p>
@@ -1166,7 +1616,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="panel-subsection">
+              <div id="onpage-workspace-table" className="panel-subsection">
                 <div className="subsection-heading">
                   <h3>Top opportunities</h3>
                   <p>Use scan buttons for deeper review, and manual overrides when your judgment should overrule the model.</p>
@@ -1254,7 +1704,7 @@ function App() {
                 )}
               </div>
 
-              <div className="findings-list">
+              <div id="onpage-workspace-findings" className="findings-list">
                 {report.findings.map((finding) => (
                   <article key={finding.id} className={`finding-card severity-${finding.severity}`}>
                     <div className="finding-topline">
@@ -1274,43 +1724,56 @@ function App() {
         </section>
       )}
         </>
+      ) : activeTool === 'answer-visibility' ? (
+        <AnswerVisibilityTracker />
       ) : (
         <section className="eeat-shell">
-          <section className="panel toolbar-panel">
-            <div className="toolbar-row">
-              <div>
+          <section id="eeat-batch-panel" className="panel toolbar-panel compact-toolbar-panel eeat-entry-panel">
+            <div className="eeat-entry-layout">
+              <div className="eeat-entry-copy">
                 <p className="panel-kicker">EEAT Scanner</p>
-                <h2>Scan a page for trust and authority signals</h2>
+                <h2>Scan one page and review its trust signals clearly</h2>
                 <p className="panel-copy">
-                  This tool audits only the page you enter. It reviews visible content, media, links, markup, and writing signals on that exact URL, then scores each EEAT criterion with evidence, gaps, and recommendations.
+                  Enter one URL and we will audit only that page. The review checks visible content, media, links, markup, and writing signals, then turns them into evidence, gaps, and prioritized next steps.
                 </p>
+                <div className="eeat-entry-notes">
+                  <span className="workspace-chip">Page-only review</span>
+                  <span className="workspace-chip">Visual evidence</span>
+                  <span className="workspace-chip">Top 5 quick wins</span>
+                </div>
               </div>
-              <div className="toolbar-actions eeat-toolbar-actions">
-                <input
-                  type="url"
-                  placeholder="https://example.com/page-to-review"
-                  value={eeatUrl}
-                  onChange={(event) => setEeatUrl(event.target.value)}
-                />
-                <button type="button" onClick={() => void runEeatScan(eeatUrl)}>
-                  {isScanningEeat ? 'Scanning page...' : 'Run EEAT scan'}
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={!eeatResult}
-                  onClick={() => eeatResult ? exportEeatJson([eeatResult], 'eeat-audit.json') : undefined}
-                >
-                  Export JSON
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={!eeatResult}
-                  onClick={() => eeatResult ? exportEeatCsv([eeatResult], 'eeat-audit.csv') : undefined}
-                >
-                  Export CSV
-                </button>
+
+              <div className="eeat-entry-actions">
+                <label className="input-block eeat-url-block">
+                  <span>Page URL</span>
+                  <input
+                    type="url"
+                    placeholder="https://example.com/page-to-review"
+                    value={eeatUrl}
+                    onChange={(event) => setEeatUrl(event.target.value)}
+                  />
+                </label>
+                <div className="eeat-primary-actions">
+                  <button type="button" onClick={() => void runEeatScan(eeatUrl)}>
+                    {isScanningEeat ? 'Scanning page...' : 'Run EEAT scan'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={!eeatResult}
+                    onClick={() => eeatResult ? exportEeatJson([eeatResult], 'eeat-audit.json') : undefined}
+                  >
+                    Export JSON
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={!eeatResult}
+                    onClick={() => eeatResult ? exportEeatCsv([eeatResult], 'eeat-audit.csv') : undefined}
+                  >
+                    Export CSV
+                  </button>
+                </div>
               </div>
             </div>
             {showGeminiSetupPanel ? (
@@ -1429,7 +1892,7 @@ function App() {
           {eeatResult ? (
             <section className="dashboard-shell eeat-dashboard-shell">
               <div className="dashboard-main">
-                <article className="panel output-panel preview-panel">
+                <article id="eeat-overview" className="panel output-panel preview-panel">
                   <div className="report-hero">
                     <div>
                       <p className="report-source">{eeatResult.url}</p>
@@ -1459,7 +1922,7 @@ function App() {
                   </div>
 
                   {eeatResult.analysis.actionPlan.length > 0 ? (
-                    <div className="panel-subsection eeat-action-plan">
+                    <div id="eeat-quick-wins" className="panel-subsection eeat-action-plan">
                       <div className="subsection-heading">
                         <div>
                           <p className="panel-kicker">Quick Wins</p>
@@ -1562,7 +2025,7 @@ function App() {
                   </div>
                 </article>
 
-                <article className="panel preview-panel">
+                <article id="eeat-visual-proof" className="panel preview-panel">
                   <div className="subsection-heading">
                     <div>
                       <p className="panel-kicker">Evidence</p>
@@ -1614,7 +2077,7 @@ function App() {
               </div>
 
               <aside className="dashboard-rail">
-                <section className="panel rail-panel">
+                <section id="eeat-page-details" className="panel rail-panel">
                   <div className="subsection-heading">
                     <div>
                       <p className="panel-kicker">Page summary</p>
@@ -1657,7 +2120,7 @@ function App() {
                   </div>
                 </section>
 
-                <section className="panel rail-panel">
+                <section id="eeat-formula" className="panel rail-panel">
                   <div className="subsection-heading">
                     <div>
                       <p className="panel-kicker">Formula</p>
@@ -1693,7 +2156,7 @@ function App() {
           )}
 
           {eeatResult ? (
-            <section className="panel output-panel workspace-panel">
+            <section id="eeat-rubric" className="panel output-panel workspace-panel">
               <details className="disclosure-panel">
                 <summary>Open full rubric and evidence breakdown</summary>
                 <div className="disclosure-body">
@@ -1769,7 +2232,10 @@ function App() {
           ) : null}
         </section>
       )}
+          </div>
+        </section>
       </div>
+      </section>
     </main>
   )
 }

@@ -1,0 +1,66 @@
+.answer-visibility-shell,
+.answer-visibility-main,
+.answer-summary-panel,
+.answer-records-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.answer-visibility-entry,
+.answer-visibility-results-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.answer-visibility-entry-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.answer-visibility-entry-copy h2 {
+  max-width: 760px;
+  line-height: 1.08;
+}
+
+.answer-visibility-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.answer-visibility-entry-grid.single-column {
+  grid-template-columns: 1fr;
+}
+
+.answer-visibility-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.answer-upload-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 18px;
+}
+
+.answer-visibility-results-grid {
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+}
+
+.answer-record-expanded {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  line-height: 1.65;
+  color: #31483d;
+}
+
+@media (max-width: 1180px) {
+  .answer-visibility-results-grid,
+  .answer-visibility-entry-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -2,6 +2,13 @@ import express from 'express'
 import * as cheerio from 'cheerio'
 import { chromium } from 'playwright-core'
 import fs from 'node:fs'
+import {
+  exportAnswerVisibilityCsv,
+  getAnswerVisibilityOverview,
+  listCampaigns,
+  rerunAnswerVisibilityChecks,
+  runAnswerVisibilityChecks,
+} from './lib/answer-visibility-service.mjs'
 
 const app = express()
 const port = 4174
@@ -84,6 +91,86 @@ app.get('/api/gemini-status', (_request, response) => {
       ? 'Gemini AI enhancement is built into this app instance. Users can switch it on with one click, and only need their own key later if the shared Gemini quota is exhausted.'
       : 'Gemini AI enhancement is optional. To use it right now, add a Gemini API key for this session. In a hosted version, this can be powered by the app first and only fall back to user keys when shared limits are hit.',
   })
+})
+
+app.get('/api/answer-visibility/campaigns', (_request, response) => {
+  response.json({ campaigns: listCampaigns() })
+})
+
+app.get('/api/answer-visibility/records', (request, response) => {
+  response.json(getAnswerVisibilityOverview({
+    campaignId: request.query.campaignId ? String(request.query.campaignId) : '',
+    projectTag: request.query.projectTag ? String(request.query.projectTag) : '',
+    intent: request.query.intent ? String(request.query.intent) : '',
+    dateFrom: request.query.dateFrom ? String(request.query.dateFrom) : '',
+    dateTo: request.query.dateTo ? String(request.query.dateTo) : '',
+    mentionStatus: request.query.mentionStatus ? String(request.query.mentionStatus) : '',
+    brandId: request.query.brandId ? String(request.query.brandId) : '',
+    competitorId: request.query.competitorId ? String(request.query.competitorId) : '',
+  }))
+})
+
+app.get('/api/answer-visibility/export.csv', (request, response) => {
+  const csv = exportAnswerVisibilityCsv({
+    campaignId: request.query.campaignId ? String(request.query.campaignId) : '',
+    projectTag: request.query.projectTag ? String(request.query.projectTag) : '',
+    intent: request.query.intent ? String(request.query.intent) : '',
+    dateFrom: request.query.dateFrom ? String(request.query.dateFrom) : '',
+    dateTo: request.query.dateTo ? String(request.query.dateTo) : '',
+    mentionStatus: request.query.mentionStatus ? String(request.query.mentionStatus) : '',
+    brandId: request.query.brandId ? String(request.query.brandId) : '',
+    competitorId: request.query.competitorId ? String(request.query.competitorId) : '',
+  })
+
+  response.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  response.setHeader('Content-Disposition', 'attachment; filename="ai-answer-visibility.csv"')
+  response.send(csv)
+})
+
+app.post('/api/answer-visibility/run', async (request, response) => {
+  try {
+    const prompts = Array.isArray(request.body?.prompts) ? request.body.prompts : []
+    if (prompts.length === 0) {
+      response.status(400).json({ error: 'At least one prompt is required.' })
+      return
+    }
+
+    const result = await runAnswerVisibilityChecks({
+      campaignName: String(request.body?.campaignName ?? ''),
+      projectTag: String(request.body?.projectTag ?? ''),
+      primaryBrand: request.body?.primaryBrand ?? {},
+      competitorBrands: Array.isArray(request.body?.competitorBrands) ? request.body.competitorBrands : [],
+      prompts,
+      providerPreference: String(request.body?.providerPreference ?? 'auto'),
+    })
+
+    response.json(result)
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'AI Answer Visibility run failed.',
+    })
+  }
+})
+
+app.post('/api/answer-visibility/rerun', async (request, response) => {
+  try {
+    const promptIds = Array.isArray(request.body?.promptIds) ? request.body.promptIds.map((item) => String(item)) : []
+    if (promptIds.length === 0) {
+      response.status(400).json({ error: 'At least one prompt id is required for rerun.' })
+      return
+    }
+
+    const result = await rerunAnswerVisibilityChecks({
+      promptIds,
+      providerPreference: String(request.body?.providerPreference ?? 'auto'),
+    })
+
+    response.json(result)
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'AI Answer Visibility rerun failed.',
+    })
+  }
 })
 
 async function handleEeatScan(request, response) {
