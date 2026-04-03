@@ -1,5 +1,7 @@
 import express from 'express'
 import * as cheerio from 'cheerio'
+import { chromium } from 'playwright-core'
+import fs from 'node:fs'
 
 const app = express()
 const port = 4174
@@ -91,11 +93,21 @@ app.get('/api/eeat-scan', async (request, response) => {
 
   try {
     const page = await fetchAndParsePage(parsedUrl)
-    const analysis = analyzeEeat({ page })
+    const visualCapture = await withTimeout(
+      capturePageVisual(parsedUrl),
+      20000,
+      () => ({
+        available: false,
+        note: 'Visual capture timed out, so the EEAT audit returned text-based results only for this page.',
+        evidenceBlocks: [],
+      }),
+    )
+    const analysis = analyzeEeat({ page, visualCapture })
 
     response.json({
       url: parsedUrl.toString(),
       title: page.title,
+      visualCapture,
       analysis,
     })
   } catch (error) {
@@ -254,6 +266,7 @@ async function fetchAndParsePage(targetUrl) {
       'user-agent': 'SEOAnalysisToolBot/0.1 (+https://github.com/mersadberberovic-cmd/seo-analysis-tool)',
       accept: 'text/html,application/xhtml+xml',
     },
+    signal: AbortSignal.timeout(20000),
   })
 
   if (!fetched.ok) {
@@ -262,6 +275,17 @@ async function fetchAndParsePage(targetUrl) {
 
   const html = await fetched.text()
   const $ = cheerio.load(html)
+  const jsonLd = $('script[type="application/ld+json"]')
+    .map((_index, element) => $(element).html() ?? '')
+    .get()
+    .filter(Boolean)
+  const microdataTypes = $('[itemtype]')
+    .map((_index, element) => $(element).attr('itemtype') ?? '')
+    .get()
+    .filter(Boolean)
+  const hasItemProps = $('[itemprop]').length > 0
+  const hasRdfa = $('[typeof], [property], [vocab]').length > 0
+
   $('script, style, noscript').remove()
 
   const title = $('title').first().text().trim()
@@ -285,10 +309,6 @@ async function fetchAndParsePage(targetUrl) {
     }))
     .get()
   const videos = $('video, iframe[src*="youtube"], iframe[src*="vimeo"]').length
-  const jsonLd = $('script[type="application/ld+json"]')
-    .map((_index, element) => $(element).html() ?? '')
-    .get()
-    .filter(Boolean)
 
   return {
     url: targetUrl.toString(),
@@ -301,15 +321,18 @@ async function fetchAndParsePage(targetUrl) {
     images,
     videos,
     jsonLd,
+    microdataTypes,
+    hasItemProps,
+    hasRdfa,
     html,
   }
 }
 
 function analyzeEeat(input) {
-  const { page } = input
+  const { page, visualCapture } = input
   const firstWords = page.bodyText.split(/\s+/).slice(0, 85).join(' ').trim()
   const wordCount = page.bodyText.split(/\s+/).filter(Boolean).length
-  const internalLinks = page.links
+  const resolvedLinks = page.links
     .map((link) => {
       try {
         const resolved = new URL(link.href, page.url)
@@ -319,28 +342,63 @@ function analyzeEeat(input) {
       }
     })
     .filter(Boolean)
-  const outboundLinks = internalLinks.filter((link) => link.resolved.hostname !== page.hostname)
-  const onPageTrustLinks = internalLinks.filter((link) => link.resolved.hostname === page.hostname)
+  const uniqueLinks = dedupeResolvedLinks(resolvedLinks)
+  const outboundLinks = uniqueLinks.filter((link) => link.resolved.hostname !== page.hostname)
+  const internalLinks = uniqueLinks.filter((link) => link.resolved.hostname === page.hostname)
+  const contactTrustLinks = internalLinks.filter((link) => /(about|contact|team|location|locations|get in touch|call)/i.test(`${link.text} ${link.resolved.pathname}`))
+  const policyLegalLinks = internalLinks.filter((link) => /(privacy|policy|terms|conditions|editorial|warranty|guarantee)/i.test(`${link.text} ${link.resolved.pathname}`))
+  const contactTrustGroups = groupLinksByIntent(contactTrustLinks, {
+    about: /(about)/i,
+    contact: /(contact|get in touch|call)/i,
+    team: /(team)/i,
+    location: /(location|locations)/i,
+  })
+  const policyLegalGroups = groupLinksByIntent(policyLegalLinks, {
+    privacy: /(privacy)/i,
+    terms: /(terms|conditions)/i,
+    editorial: /(editorial|policy)/i,
+    warranty: /(warranty|guarantee)/i,
+  })
   const visualSummary = summarizePageVisuals(page.images, page.videos)
 
   const categories = [
     detectAuthorSignals(page),
     detectExperienceSignals(page, visualSummary),
-    detectAuthoritySignals(page, onPageTrustLinks),
+    detectAuthoritySignals(page, internalLinks),
+    detectCitationQuality(page, outboundLinks),
+    detectContentEffort(page, visualSummary),
+    detectOriginality(page, visualSummary),
+    detectPageIntent(page, firstWords),
+    detectWritingQuality(page),
     detectReviewSignals(page),
-    detectTransparencySignals(page, onPageTrustLinks),
-    detectSchemaSignals(page.jsonLd),
+    detectContactVisibility(page, contactTrustLinks, contactTrustGroups),
+    detectPolicyVisibility(page, policyLegalLinks, policyLegalGroups),
+    detectSchemaSignals({
+      jsonLdBlocks: page.jsonLd,
+      microdataTypes: page.microdataTypes,
+      hasItemProps: page.hasItemProps,
+      hasRdfa: page.hasRdfa,
+    }),
     detectAnswerSignals(firstWords, page.headings),
     detectDataSignals(page.bodyText),
-    detectConversationalSignals(page, firstWords),
-    detectOutboundLinkSignals(outboundLinks),
-    detectThirdPartyReviewSignals(outboundLinks),
   ]
 
+  const totalPoints = categories.reduce((sum, category) => sum + category.max, 0)
   const earnedPoints = categories.reduce((sum, category) => sum + category.earned, 0)
-  const score = Math.round((earnedPoints / 100) * 100)
+  const score = Math.round((earnedPoints / totalPoints) * 100)
   const strengths = categories.filter((category) => category.earned >= category.max * 0.7).map((category) => `${category.label}: ${category.summary}`)
   const priorities = categories.filter((category) => category.earned < category.max * 0.55).map((category) => `${category.label}: ${category.recommendation}`)
+  const actionPlan = categories
+    .filter((category) => category.earned < category.max)
+    .sort((left, right) => (left.earned / left.max) - (right.earned / right.max))
+    .slice(0, 5)
+    .map((category, index) => ({
+      priority: index + 1,
+      label: category.label,
+      reason: category.gaps[0] ?? category.summary,
+      recommendation: category.recommendation,
+    }))
+  const evidenceBlocks = visualCapture?.evidenceBlocks ?? []
 
   return {
     score: Math.max(0, Math.min(100, score)),
@@ -352,18 +410,23 @@ function analyzeEeat(input) {
           : 'Weak page-level EEAT coverage based on the visible signals on this page.',
     formula: {
       earnedPoints,
-      totalPoints: 100,
+      totalPoints,
       explanation: 'The EEAT score is the sum of weighted page-level categories. Each category has a fixed maximum point value and only visible signals on the scanned page count.',
       categories: categories.map((category) => ({
         id: category.id,
         label: category.label,
         earned: category.earned,
         max: category.max,
+        confidence: category.confidence,
       })),
     },
     strengths,
     priorities,
+    actionPlan,
     visualSummary,
+    visualCapture,
+    evidenceCoverage: `${categories.filter((category) => category.evidenceIds.length > 0).length} of ${categories.length} criteria include direct visual evidence blocks.`,
+    evidenceBlocks,
     categories,
     firstWords,
     title: page.title,
@@ -371,7 +434,8 @@ function analyzeEeat(input) {
     pageSignals: {
       wordCount,
       headingCount: page.headings.length,
-      trustLinkCount: onPageTrustLinks.filter((link) => /(about|contact|privacy|policy|terms|editorial|team)/i.test(`${link.text} ${link.resolved.pathname}`)).length,
+      contactLinkCount: contactTrustGroups.length,
+      policyLinkCount: policyLegalGroups.length,
       outboundLinkCount: outboundLinks.length,
       authoritativeOutboundLinkCount: outboundLinks.filter((link) => isAuthorityLink(link.resolved.hostname)).length,
     },
@@ -379,7 +443,7 @@ function analyzeEeat(input) {
 }
 
 function detectAuthorSignals(page) {
-  const snippet = findSnippet(page.bodyText, /(written by|author|about the author|bio|credentials|esq|phd|md|dr\.)/i)
+  const snippet = findSnippet(page.bodyText, /(written by|about the author|author bio|author profile|meet the author|reviewed by|by [A-Z][a-z]+ [A-Z][a-z]+|dr\. [A-Z][a-z]+|[A-Z][a-z]+, (phd|md|esq))/i)
   const socialLinks = page.links.filter((link) => /linkedin|x\.com|twitter|github|instagram|facebook/.test(link.href))
   let earned = 0
   const findings = []
@@ -392,10 +456,10 @@ function detectAuthorSignals(page) {
     gaps.push('No clear author name, bio, or credential block was found in the visible page copy.')
   }
 
-  if (socialLinks.length > 0) {
-    earned += Math.min(4, socialLinks.length * 2)
+  if (snippet && socialLinks.length > 0) {
+    earned += Math.min(2, socialLinks.length)
     findings.push(`Found ${socialLinks.length} visible profile/social link(s) on the page.`)
-  } else {
+  } else if (socialLinks.length === 0) {
     gaps.push('No visible social or profile links were detected on the page.')
   }
 
@@ -410,6 +474,8 @@ function detectAuthorSignals(page) {
     recommendation: snippet
       ? 'Make the author block more explicit with role, credentials, and why this author is qualified to write this page.'
       : 'Add a visible author section with name, credentials, role, and a short expertise summary directly on the page.',
+    evidenceIds: snippet ? ['author-credibility'] : [],
+    confidenceHint: snippet ? 'direct' : 'heuristic',
   })
 }
 
@@ -451,6 +517,8 @@ function detectExperienceSignals(page, visualSummary) {
     findings,
     gaps,
     recommendation: 'Add concrete proof of experience on the page such as original screenshots, before/after examples, case-study blocks, or clearly stated outcomes from real work.',
+    evidenceIds: firstHandSnippet ? ['first-hand-experience'] : [],
+    confidenceHint: firstHandSnippet ? 'direct' : 'mixed',
   })
 }
 
@@ -497,6 +565,231 @@ function detectAuthoritySignals(page, internalLinks) {
     findings,
     gaps,
     recommendation: 'Strengthen the page with more complete subtopic coverage, richer supporting sections, and contextual links to closely related supporting pages.',
+    confidenceHint: 'heuristic',
+  })
+}
+
+function detectCitationQuality(page, outboundLinks) {
+  const authorityLinks = outboundLinks.filter((link) => isAuthorityLink(link.resolved.hostname))
+  const citationLikeSnippet = findSnippet(page.bodyText, /(according to|study|research|report|data from|source:|sources:)/i)
+  const citedAuthorityLinks = authorityLinks.filter((link) => link.text.trim().length > 0)
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (citationLikeSnippet) {
+    earned += 4
+    findings.push(`Found citation-like wording in the copy: "${citationLikeSnippet}"`)
+  } else {
+    gaps.push('No obvious in-body citation wording such as "according to", "research", or "source" was found.')
+  }
+
+  if (citationLikeSnippet && citedAuthorityLinks.length > 0) {
+    earned += Math.min(4, citedAuthorityLinks.length * 2)
+    findings.push(`Found ${citedAuthorityLinks.length} authoritative outbound link(s) that could support those in-body claims.`)
+  } else if (authorityLinks.length > 0) {
+    earned += 1
+    findings.push(`Found ${authorityLinks.length} authoritative outbound link(s), but they are not clearly tied to in-body citations.`)
+  } else {
+    gaps.push('No outbound links to clearly authoritative or primary-source domains were detected.')
+  }
+
+  if (outboundLinks.length === 0) {
+    gaps.push('No outbound links were detected on the page.')
+  }
+
+  return buildEeatCategory({
+    id: 'citation-quality',
+    label: 'Citation quality',
+    max: 10,
+    earned,
+    summary: earned >= 6
+      ? 'The page includes some visible citation or source-quality signals.'
+      : 'The page makes weak visible use of sources or supporting citations.',
+    findings,
+    gaps,
+    recommendation: 'Support important claims with authoritative outbound sources and make those citations obvious in the body copy.',
+    confidenceHint: citationLikeSnippet && citedAuthorityLinks.length > 0 ? 'mixed' : 'heuristic',
+  })
+}
+
+function detectContentEffort(page, visualSummary) {
+  const wordCount = page.bodyText.split(/\s+/).filter(Boolean).length
+  const hasMethodSnippet = findSnippet(page.bodyText, /(process|framework|step-by-step|how we|methodology|tested|audit|checklist|template)/i)
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (wordCount >= 1400) {
+    earned += 4
+    findings.push(`Visible body copy is approximately ${wordCount} words, indicating substantial effort.`)
+  } else if (wordCount >= 800) {
+    earned += 2
+    findings.push(`Visible body copy is approximately ${wordCount} words, suggesting moderate effort.`)
+  } else {
+    gaps.push(`Visible body copy is approximately ${wordCount} words, which is modest for a high-effort page.`)
+  }
+
+  if (hasMethodSnippet) {
+    earned += 3
+    findings.push(`Found process or methodology wording: "${hasMethodSnippet}"`)
+  } else {
+    gaps.push('No strong “show your work” or methodology language was detected in the page copy.')
+  }
+
+  if (visualSummary.meaningfulImageCount > 0 || visualSummary.videoCount > 0) {
+    earned += 3
+    findings.push(`Found ${visualSummary.meaningfulImageCount} meaningful image(s) and ${visualSummary.videoCount} video/embed(s), which suggests some production effort.`)
+  } else {
+    gaps.push('No meaningful visuals or video proof were detected to support a high-effort impression.')
+  }
+
+  return buildEeatCategory({
+    id: 'content-effort',
+    label: 'Content effort',
+    max: 10,
+    earned,
+    summary: earned >= 6
+      ? 'The page shows moderate to strong visible effort signals.'
+      : 'The page does not yet strongly demonstrate visible effort or proof-of-work signals.',
+    findings,
+    gaps,
+    recommendation: 'Add clearer methodology, richer examples, and more proof assets so the page visibly shows the work behind the content.',
+    evidenceIds: hasMethodSnippet ? ['first-hand-experience'] : [],
+    confidenceHint: hasMethodSnippet ? 'mixed' : 'heuristic',
+  })
+}
+
+function detectOriginality(page, visualSummary) {
+  const uniqueAngleSnippet = findSnippet(page.bodyText, /(our framework|our process|our audit|we found|we tested|our experience|case study|example from)/i)
+  const screenshotEvidence = visualSummary.screenshotLikeImages
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (uniqueAngleSnippet) {
+    earned += 5
+    findings.push(`Found originality or unique-angle wording: "${uniqueAngleSnippet}"`)
+  } else {
+    gaps.push('No clear language was detected that signals a unique framework, original finding, or proprietary angle.')
+  }
+
+  if (screenshotEvidence > 0) {
+    earned += 3
+    findings.push(`Found ${screenshotEvidence} screenshot-like visual(s), which may support originality or proprietary examples.`)
+  } else {
+    gaps.push('No screenshot-like evidence was detected to support a proprietary or original angle.')
+  }
+
+  if (page.headings.length >= 6) {
+    earned += 2
+    findings.push(`The page contains ${page.headings.length} headings, which suggests the page may add a fuller angle rather than a very thin summary.`)
+  } else {
+    gaps.push('The heading structure is limited, which can make the page feel more generic or summarised.')
+  }
+
+  return buildEeatCategory({
+    id: 'original-content',
+    label: 'Original content',
+    max: 10,
+    earned,
+    summary: earned >= 6
+      ? 'The page shows some visible signs of originality or a non-generic angle.'
+      : 'The page does not yet clearly prove that it adds something original or hard to replicate.',
+    findings,
+    gaps,
+    recommendation: 'Add proprietary examples, screenshots, original frameworks, or clearly stated unique insights that competitors cannot easily copy.',
+    evidenceIds: uniqueAngleSnippet ? ['first-hand-experience'] : [],
+    confidenceHint: uniqueAngleSnippet ? 'mixed' : 'heuristic',
+  })
+}
+
+function detectPageIntent(page, firstWords) {
+  const ctaLinks = page.links.filter((link) => /(contact|book|demo|get started|buy|pricing|call|schedule|quote)/i.test(`${link.text} ${link.href}`))
+  const helpfulSnippet = findSnippet(`${page.title} ${firstWords} ${page.headings.join(' ')}`, /(how to|guide|learn|what is|tips|best practices|steps|strategy)/i)
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (helpfulSnippet) {
+    earned += 6
+    findings.push(`Found helpful-first phrasing that suggests the page is solving a user problem: "${helpfulSnippet}"`)
+  } else {
+    gaps.push('The opening content does not clearly signal a helpful-first purpose or user problem being solved.')
+  }
+
+  if (ctaLinks.length > 0) {
+    earned += 2
+    findings.push(`Found ${ctaLinks.length} commercial CTA link(s). That is acceptable if the page still clearly helps the user.`)
+  }
+
+  if (page.bodyText.split(/\s+/).filter(Boolean).length >= 700) {
+    earned += 2
+    findings.push('The page has enough visible copy to suggest it is trying to explain or help, not just capture traffic.')
+  } else {
+    gaps.push('The page may be too light to fully prove a helpful-first purpose.')
+  }
+
+  return buildEeatCategory({
+    id: 'page-intent',
+    label: 'Page intent',
+    max: 10,
+    earned,
+    summary: earned >= 6
+      ? 'The page appears to have a reasonably clear helpful-first purpose.'
+      : 'The page intent is not yet clearly expressed as helpful-first from the visible content alone.',
+    findings,
+    gaps,
+    recommendation: 'Clarify the user problem early, state what the page will help the reader achieve, and make the value of the page obvious in the opening section.',
+    evidenceIds: ['opening-section'],
+    confidenceHint: helpfulSnippet ? 'mixed' : 'heuristic',
+  })
+}
+
+function detectWritingQuality(page) {
+  const sentences = page.bodyText.split(/[.!?]+/).map((sentence) => sentence.trim()).filter(Boolean)
+  const words = page.bodyText.split(/\s+/).filter(Boolean)
+  const averageSentenceLength = sentences.length > 0 ? Math.round(words.length / sentences.length) : 0
+  const passiveMatches = page.bodyText.match(/\b(is|are|was|were|be|been|being)\s+\w+ed\b/gi) ?? []
+  const heavyAdverbs = page.bodyText.match(/\b(clearly|obviously|absolutely|very|really|extremely|always|never)\b/gi) ?? []
+  const uniqueWordRatio = words.length > 0 ? new Set(words.map((word) => word.toLowerCase())).size / words.length : 0
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (averageSentenceLength >= 12 && averageSentenceLength <= 22) {
+    earned += 4
+    findings.push(`Average sentence length is about ${averageSentenceLength} words, which is within a readable range.`)
+  } else {
+    gaps.push(`Average sentence length is about ${averageSentenceLength} words, which may be too short/choppy or too long/dense.`)
+  }
+
+  if (uniqueWordRatio >= 0.45) {
+    earned += 3
+    findings.push(`Vocabulary diversity is reasonable with an approximate unique-word ratio of ${(uniqueWordRatio * 100).toFixed(0)}%.`)
+  } else {
+    gaps.push(`Vocabulary diversity looks limited with an approximate unique-word ratio of ${(uniqueWordRatio * 100).toFixed(0)}%.`)
+  }
+
+  if (passiveMatches.length <= 6 && heavyAdverbs.length <= 10) {
+    earned += 3
+    findings.push(`Passive-voice style matches: ${passiveMatches.length}; heavy adverb matches: ${heavyAdverbs.length}.`)
+  } else {
+    gaps.push(`Passive-voice style matches: ${passiveMatches.length}; heavy adverb matches: ${heavyAdverbs.length}, which may reduce clarity or directness.`)
+  }
+
+  return buildEeatCategory({
+    id: 'writing-quality',
+    label: 'Writing quality',
+    max: 10,
+    earned,
+    summary: earned >= 6
+      ? 'The writing looks reasonably readable based on sentence length, vocabulary mix, and clarity cues.'
+      : 'The writing quality metrics suggest the page may need tightening for clarity and readability.',
+    findings,
+    gaps,
+    recommendation: 'Improve readability by tightening sentence length, reducing filler adverbs, and making the language more direct and varied.',
+    confidenceHint: 'heuristic',
   })
 }
 
@@ -515,53 +808,97 @@ function detectReviewSignals(page) {
     findings: reviewedSnippet ? [`Found review/validation wording: "${reviewedSnippet}"`] : [],
     gaps: reviewedSnippet ? [] : ['No visible reviewed-by, fact-checked, or expert-approved section was detected on the page.'],
     recommendation: 'If this topic needs extra trust, add an explicit reviewed-by or expert validation section on the page itself.',
+    evidenceIds: reviewedSnippet ? ['reviewed-by'] : [],
+    confidenceHint: reviewedSnippet ? 'direct' : 'mixed',
   })
 }
 
-function detectTransparencySignals(page, internalLinks) {
-  const helperLinks = internalLinks.filter((link) => /(about|contact|privacy|policy|terms|editorial|team)/i.test(`${link.text} ${link.resolved.pathname}`))
+function detectContactVisibility(page, contactLinks, contactGroups) {
   const emailSnippet = findSnippet(page.bodyText, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
   const phoneSnippet = findSnippet(page.bodyText, /(?:\+\d{1,2}\s?)?(?:\(?\d{2,4}\)?[\s.-]?)?\d{3}[\s.-]?\d{3,4}/i)
+  const addressSnippet = findSnippet(page.bodyText, /\b\d{1,4}\s+[A-Za-z0-9.'-]+\s+(street|st|road|rd|avenue|ave|lane|ln|drive|dr|boulevard|blvd)\b/i)
   let earned = 0
   const findings = []
   const gaps = []
 
-  if (helperLinks.length > 0) {
-    earned += Math.min(6, helperLinks.length * 2)
-    findings.push(`Found ${helperLinks.length} visible trust-oriented link(s) on the page, such as About, Contact, Privacy, or Terms.`)
+  if (contactGroups.length > 0) {
+    earned += Math.min(4, 1 + contactGroups.length)
+    findings.push(`Found ${contactGroups.length} distinct contact-trust signal type(s): ${contactGroups.join(', ')}.`)
   } else {
-    gaps.push('No visible About, Contact, Privacy, Terms, or Editorial links were detected on the page.')
+    gaps.push('No clear About, Contact, Team, or location links were detected on the page.')
   }
 
-  if (emailSnippet || phoneSnippet) {
+  if (emailSnippet || phoneSnippet || addressSnippet) {
     earned += 4
-    findings.push(`Contact detail detected on the page: "${emailSnippet ?? phoneSnippet}"`)
+    findings.push(`Visible contact detail detected on the page: "${emailSnippet ?? phoneSnippet ?? addressSnippet}"`)
   } else {
-    gaps.push('No visible email address or phone number was detected in the page copy.')
+    gaps.push('No visible email address, phone number, or physical address was detected in the page copy.')
   }
 
   return buildEeatCategory({
-    id: 'transparency-safety',
-    label: 'Transparency and safety',
-    max: 10,
+    id: 'contact-visibility',
+    label: 'Contact visibility',
+    max: 8,
     earned,
-    summary: earned >= 6
-      ? 'The page exposes some visible trust and transparency signals.'
-      : 'The page does not make trust and transparency signals visible enough on-page.',
+    summary: earned >= 5
+      ? 'The page exposes clear contact and business-presence signals.'
+      : 'The page does not make contact and business-presence signals visible enough on-page.',
     findings,
     gaps,
-    recommendation: 'Expose trust signals more clearly on the page with visible contact details, trust-policy links, and editorial/update information where relevant.',
+    recommendation: 'Expose trust signals more clearly on the page with visible contact details and clearer About, Contact, Team, or location links near key conversion points.',
+    evidenceIds: contactGroups.length > 0 || emailSnippet || phoneSnippet || addressSnippet ? ['transparency-safety'] : [],
+    confidenceHint: contactGroups.length > 0 || emailSnippet || phoneSnippet || addressSnippet ? 'direct' : 'mixed',
   })
 }
 
-function detectSchemaSignals(jsonLdBlocks) {
+function detectPolicyVisibility(page, policyLinks, policyGroups) {
+  let earned = 0
+  const findings = []
+  const gaps = []
+
+  if (policyGroups.length > 0) {
+    earned += Math.min(6, 2 + policyGroups.length * 2)
+    findings.push(`Found ${policyGroups.length} distinct policy/legal signal type(s): ${policyGroups.join(', ')}.`)
+  } else {
+    gaps.push('No clear Privacy, Terms, Policy, warranty, guarantee, or Editorial links were detected on the page.')
+  }
+
+  return buildEeatCategory({
+    id: 'policy-legal-visibility',
+    label: 'Policy and legal visibility',
+    max: 6,
+    earned,
+    summary: earned >= 4
+      ? 'The page exposes at least some policy, legal, or warranty signals.'
+      : 'The page does not make policy, legal, or warranty signals visible enough on-page.',
+    findings,
+    gaps,
+    recommendation: 'Add clearly labeled Privacy, Terms, warranty, guarantee, or editorial-policy links where they can be discovered from this page without hunting through repeated navigation.',
+    confidenceHint: policyGroups.length > 0 ? 'direct' : 'heuristic',
+  })
+}
+
+function detectSchemaSignals({ jsonLdBlocks, microdataTypes, hasItemProps, hasRdfa }) {
   const normalizedSchema = jsonLdBlocks.join(' ').toLowerCase()
+  const normalizedMicrodata = microdataTypes.join(' ').toLowerCase()
   const findings = []
   let earned = 0
 
   if (jsonLdBlocks.length > 0) {
     earned += 2
     findings.push(`Detected ${jsonLdBlocks.length} JSON-LD block(s).`)
+  }
+  if (microdataTypes.length > 0) {
+    earned += 2
+    findings.push(`Detected ${microdataTypes.length} microdata itemtype declaration(s), including ${microdataTypes.slice(0, 3).join(', ')}.`)
+  }
+  if (hasItemProps) {
+    earned += 1
+    findings.push('Detected itemprop attributes, which indicates embedded microdata markup.')
+  }
+  if (hasRdfa) {
+    earned += 1
+    findings.push('Detected RDFa-style attributes such as typeof, property, or vocab.')
   }
   if (normalizedSchema.includes('"sameas"')) {
     earned += 3
@@ -574,6 +911,10 @@ function detectSchemaSignals(jsonLdBlocks) {
   if (/(article|blogposting|newsarticle)/.test(normalizedSchema)) {
     earned += 2
     findings.push('Detected Article-style schema.')
+  }
+  if (/(organization|localbusiness|review|aggregateRating|reviewsnippet|legalservice|attorney)/i.test(normalizedSchema + ' ' + normalizedMicrodata)) {
+    earned += 2
+    findings.push('Detected entity/schema types relevant to trust or business validation, such as Organization, LocalBusiness, Review, or similar.')
   }
   if (normalizedSchema.includes('speakable')) {
     earned += 1
@@ -589,6 +930,7 @@ function detectSchemaSignals(jsonLdBlocks) {
     findings,
     gaps: earned > 0 ? [] : ['No JSON-LD or other obvious machine-readable EEAT-supporting schema was detected.'],
     recommendation: 'Add or strengthen schema such as Article, FAQPage, Organization/Person with sameAs, and other markup that helps search engines and AI systems understand the page.',
+    confidenceHint: 'mixed',
   })
 }
 
@@ -622,6 +964,8 @@ function detectAnswerSignals(firstWords, headings) {
     findings,
     gaps,
     recommendation: 'Rewrite the opening section so the page begins with a concise direct answer before expanding into detail.',
+    evidenceIds: ['opening-section'],
+    confidenceHint: 'mixed',
   })
 }
 
@@ -655,6 +999,7 @@ function detectDataSignals(bodyText) {
     findings,
     gaps,
     recommendation: 'Add precise metrics, percentages, counts, and sourced data points that can be quoted or cited directly.',
+    confidenceHint: 'mixed',
   })
 }
 
@@ -726,7 +1071,18 @@ function normalizeText(value) {
   return String(value ?? '').toLowerCase().replace(/[^a-z0-9\s-]+/g, ' ')
 }
 
-function buildEeatCategory({ id, label, max, earned, summary, findings, gaps, recommendation }) {
+function buildEeatCategory({
+  id,
+  label,
+  max,
+  earned,
+  summary,
+  findings,
+  gaps,
+  recommendation,
+  evidenceIds = [],
+  confidenceHint = 'mixed',
+}) {
   return {
     id,
     label,
@@ -736,7 +1092,36 @@ function buildEeatCategory({ id, label, max, earned, summary, findings, gaps, re
     findings,
     gaps,
     recommendation,
+    evidenceIds,
+    confidence: inferCategoryConfidence({
+      earned,
+      max,
+      findings,
+      evidenceIds,
+      confidenceHint,
+    }),
   }
+}
+
+function inferCategoryConfidence({ earned, max, findings, evidenceIds, confidenceHint }) {
+  const normalizedEarned = Math.max(0, Math.min(max, earned))
+  const ratio = max > 0 ? normalizedEarned / max : 0
+  const hasDirectEvidence = evidenceIds.length > 0
+  const hasFindings = findings.length > 0
+
+  if (confidenceHint === 'heuristic') {
+    return ratio >= 0.7 && hasFindings ? 'medium' : 'low'
+  }
+
+  if (confidenceHint === 'direct') {
+    if (hasDirectEvidence && hasFindings) return 'high'
+    if (hasFindings) return 'medium'
+    return 'low'
+  }
+
+  if (hasDirectEvidence && hasFindings) return 'high'
+  if (hasFindings || ratio >= 0.55) return 'medium'
+  return 'low'
 }
 
 function summarizePageVisuals(images, videoCount) {
@@ -771,6 +1156,252 @@ function findSnippet(text, regex) {
   const start = Math.max(0, match.index - 60)
   const end = Math.min(source.length, match.index + match[0].length + 80)
   return source.slice(start, end).trim()
+}
+
+function dedupeResolvedLinks(links) {
+  const seen = new Set()
+
+  return links.filter((link) => {
+    const key = `${link.resolved.hostname}${link.resolved.pathname}${link.resolved.search}|${normalizeText(link.text)}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function groupLinksByIntent(links, patterns) {
+  const found = new Set()
+
+  links.forEach((link) => {
+    const value = `${link.text} ${link.resolved.pathname}`
+    for (const [label, pattern] of Object.entries(patterns)) {
+      if (pattern.test(value)) {
+        found.add(label)
+      }
+    }
+  })
+
+  return [...found]
+}
+
+async function capturePageVisual(targetUrl) {
+  const executablePath = getBrowserExecutablePath()
+  if (!executablePath) {
+    return {
+      available: false,
+      note: 'No supported browser executable was found for screenshot capture on this machine.',
+    }
+  }
+
+  let browser
+  try {
+    browser = await chromium.launch({
+      executablePath,
+      headless: true,
+    })
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1800 },
+      deviceScaleFactor: 1,
+    })
+    page.setDefaultNavigationTimeout(15000)
+    page.setDefaultTimeout(12000)
+    await page.goto(targetUrl.toString(), {
+      waitUntil: 'domcontentloaded',
+      timeout: 15000,
+    })
+    await page.waitForLoadState('load', { timeout: 5000 }).catch(() => {})
+    await page.waitForTimeout(1200).catch(() => {})
+    const screenshotBuffer = await page.screenshot({
+      type: 'jpeg',
+      quality: 72,
+      fullPage: false,
+    })
+
+    const screenshotBase64 = screenshotBuffer.toString('base64')
+    const pageTitle = await page.title()
+    const visibleText = await page.locator('body').innerText().catch(() => '')
+    const evidenceBlocks = await captureEvidenceBlocks(page)
+
+    return {
+      available: true,
+      screenshotDataUrl: `data:image/jpeg;base64,${screenshotBase64}`,
+      title: pageTitle,
+      visibleTextPreview: String(visibleText || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+      note: `Screenshot captured from the live rendered page above the fold. ${evidenceBlocks.length} focused evidence block(s) were also captured from the same page.`,
+      evidenceBlocks,
+    }
+  } catch (error) {
+    return {
+      available: false,
+      note: error instanceof Error ? error.message : 'Visual capture failed.',
+      evidenceBlocks: [],
+    }
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {})
+    }
+  }
+}
+
+async function withTimeout(taskPromise, timeoutMs, onTimeout) {
+  let timeoutId
+
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve(onTimeout())
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([taskPromise, timeoutPromise])
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+async function captureEvidenceBlocks(page) {
+  const blocks = []
+
+  const targetedBlocks = [
+    {
+      id: 'author-credibility',
+      label: 'Author or reviewer evidence',
+      selectors: [
+        'text=/written by|about the author|author bio|author profile|meet the author|reviewed by|by [A-Z][a-z]+ [A-Z][a-z]+/i',
+      ],
+      note: 'Focused crop used to verify a visible author, reviewer, or named expert block.',
+    },
+    {
+      id: 'first-hand-experience',
+      label: 'Experience proof block',
+      selectors: [
+        'text=/case study|client results|our experience|we tested|we found|real example|from our work|our process/i',
+      ],
+      note: 'Focused crop used to verify first-hand experience or proof-of-work language.',
+    },
+    {
+      id: 'reviewed-by',
+      label: 'Reviewed-by or validation block',
+      selectors: [
+        'text=/reviewed by|fact checked|approved by|editorial review|medically reviewed/i',
+      ],
+      note: 'Focused crop used to verify review or validation language directly on the page.',
+    },
+    {
+      id: 'transparency-safety',
+      label: 'Contact or trust signal block',
+      selectors: [
+        'text=/contact|privacy|terms|about us|about|editorial|team|@|street|road|avenue|phone/i',
+      ],
+      note: 'Focused crop used to verify visible contact, address, or trust-navigation signals on the page.',
+    },
+  ]
+
+  for (const block of targetedBlocks) {
+    const captured = await captureEvidenceBlock(page, block)
+    if (captured) {
+      blocks.push(captured)
+    }
+  }
+
+  const openingBlock = await captureOpeningEvidenceBlock(page)
+  if (openingBlock) {
+    blocks.push(openingBlock)
+  }
+
+  return blocks
+}
+
+async function captureEvidenceBlock(page, config) {
+  for (const selector of config.selectors) {
+    const locator = page.locator(selector).first()
+    const count = await locator.count().catch(() => 0)
+    if (count < 1) continue
+
+    const elementHandle = await locator.elementHandle().catch(() => null)
+    if (!elementHandle) continue
+
+    const containerHandle = await elementHandle.evaluateHandle((node) => {
+      let current = node
+      while (current && current !== document.body) {
+        const rect = current.getBoundingClientRect()
+        const text = (current.innerText || current.textContent || '').replace(/\s+/g, ' ').trim()
+        if (rect.width >= 220 && rect.height >= 70 && text.length >= 24) {
+          return current
+        }
+        current = current.parentElement
+      }
+      return node
+    }).catch(() => null)
+
+    const targetHandle = containerHandle?.asElement() ?? elementHandle
+    if (!targetHandle) continue
+
+    try {
+      await targetHandle.scrollIntoViewIfNeeded().catch(() => {})
+      const screenshotBuffer = await targetHandle.screenshot({
+        type: 'jpeg',
+        quality: 74,
+        animations: 'disabled',
+      })
+      const evidenceText = await targetHandle.evaluate((node) => {
+        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim()
+        return text.slice(0, 220)
+      }).catch(() => '')
+
+      return {
+        id: config.id,
+        label: config.label,
+        screenshotDataUrl: `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`,
+        note: config.note,
+        matchedText: evidenceText,
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+async function captureOpeningEvidenceBlock(page) {
+  try {
+    const viewport = page.viewportSize() ?? { width: 1440, height: 1800 }
+    const screenshotBuffer = await page.screenshot({
+      type: 'jpeg',
+      quality: 72,
+      clip: {
+        x: 0,
+        y: 0,
+        width: Math.min(viewport.width, 1280),
+        height: Math.min(viewport.height, 760),
+      },
+    })
+    const openingText = await page.locator('body').innerText().catch(() => '')
+
+    return {
+      id: 'opening-section',
+      label: 'Opening section',
+      screenshotDataUrl: `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`,
+      note: 'Top-of-page crop used to judge answer-first structure and how quickly the page explains itself.',
+      matchedText: String(openingText || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+    }
+  } catch {
+    return null
+  }
+}
+
+function getBrowserExecutablePath() {
+  const candidates = [
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  ]
+
+  return candidates.find((candidate) => {
+    return fs.existsSync(candidate)
+  }) ?? ''
 }
 
 function normalizeTokens(value) {

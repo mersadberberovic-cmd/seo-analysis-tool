@@ -90,21 +90,40 @@ type PageScanResponse = {
 }
 
 type ToolId = 'onpage' | 'eeat'
+type EeatConfidence = 'high' | 'medium' | 'low'
+
+type EeatEvidenceBlock = {
+  id: string
+  label: string
+  screenshotDataUrl: string
+  note: string
+  matchedText?: string
+}
 
 type EeatCategory = {
   id: string
   label: string
   earned: number
   max: number
+  confidence: EeatConfidence
   summary: string
   findings: string[]
   gaps: string[]
   recommendation: string
+  evidenceIds: string[]
 }
 
 type EeatScanResponse = {
   url: string
   title: string
+  visualCapture?: {
+    available: boolean
+    screenshotDataUrl?: string
+    title?: string
+    visibleTextPreview?: string
+    note: string
+    evidenceBlocks: EeatEvidenceBlock[]
+  }
   analysis: {
     score: number
     summary: string
@@ -117,16 +136,33 @@ type EeatScanResponse = {
         label: string
         earned: number
         max: number
+        confidence: EeatConfidence
       }>
     }
     strengths: string[]
     priorities: string[]
+    actionPlan: Array<{
+      priority: number
+      label: string
+      reason: string
+      recommendation: string
+    }>
     visualSummary: {
       meaningfulImageCount: number
       decorativeImageCount: number
       videoCount: number
       screenshotLikeImages: number
     }
+    visualCapture?: {
+      available: boolean
+      screenshotDataUrl?: string
+      title?: string
+      visibleTextPreview?: string
+      note: string
+      evidenceBlocks: EeatEvidenceBlock[]
+    }
+    evidenceCoverage: string
+    evidenceBlocks: EeatEvidenceBlock[]
     categories: EeatCategory[]
     firstWords: string
     title: string
@@ -134,7 +170,8 @@ type EeatScanResponse = {
     pageSignals: {
       wordCount: number
       headingCount: number
-      trustLinkCount: number
+      contactLinkCount: number
+      policyLinkCount: number
       outboundLinkCount: number
       authoritativeOutboundLinkCount: number
     }
@@ -146,6 +183,34 @@ type BulkScanResult = PageScanResponse & {
 }
 
 type RowRecord = Record<string, string | number | boolean | null | undefined>
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number) {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    const contentType = response.headers.get('content-type') ?? ''
+    const rawBody = await response.text()
+    const data = contentType.includes('application/json')
+      ? JSON.parse(rawBody)
+      : { error: 'The EEAT scan backend did not return JSON. Restart the dev server so the new backend route loads.' }
+
+    if (!response.ok) {
+      throw new Error(data.error ?? 'Request failed.')
+    }
+
+    return data
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('This scan took too long to finish. The page may be slow or blocking the live render step. Try again, or use a different URL.')
+    }
+
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
 
 type AnalysisSettings = {
   minimumSearchVolume: number
@@ -251,9 +316,13 @@ function App() {
   const [scanError, setScanError] = useState('')
   const [isScanningPage, setIsScanningPage] = useState(false)
   const [eeatUrl, setEeatUrl] = useState('')
+  const [eeatBatchInput, setEeatBatchInput] = useState('')
   const [eeatResult, setEeatResult] = useState<EeatScanResponse | null>(null)
+  const [eeatBatchResults, setEeatBatchResults] = useState<EeatScanResponse[]>([])
   const [eeatError, setEeatError] = useState('')
+  const [eeatBatchError, setEeatBatchError] = useState('')
   const [isScanningEeat, setIsScanningEeat] = useState(false)
+  const [isBatchScanningEeat, setIsBatchScanningEeat] = useState(false)
   const [isBulkScanning, setIsBulkScanning] = useState(false)
   const [scanOverride, setScanOverride] = useState<OverrideChoice>('auto')
   const [opportunityOverrides, setOpportunityOverrides] = useState<Record<string, OverrideChoice>>({})
@@ -390,17 +459,7 @@ function App() {
 
     try {
       const params = new URLSearchParams({ url: targetUrl.trim() })
-      const response = await fetch(`/api/eeat-scan?${params.toString()}`)
-      const contentType = response.headers.get('content-type') ?? ''
-      const rawBody = await response.text()
-      const data = contentType.includes('application/json')
-        ? JSON.parse(rawBody)
-        : { error: 'The EEAT scan backend did not return JSON. Restart the dev server so the new backend route loads.' }
-
-      if (!response.ok) {
-        throw new Error(data.error ?? 'EEAT scan failed.')
-      }
-
+      const data = await fetchJsonWithTimeout(`/api/eeat-scan?${params.toString()}`, 45000)
       setEeatResult(data as EeatScanResponse)
     } catch (error) {
       setEeatResult(null)
@@ -408,6 +467,77 @@ function App() {
     } finally {
       setIsScanningEeat(false)
     }
+  }
+
+  const runBatchEeatScan = async () => {
+    const urls = eeatBatchInput
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+    if (urls.length === 0) {
+      setEeatBatchError('Add one URL per line to run a batch EEAT scan.')
+      return
+    }
+
+    setIsBatchScanningEeat(true)
+    setEeatBatchError('')
+
+    try {
+      const results: EeatScanResponse[] = []
+      for (const url of urls) {
+        const params = new URLSearchParams({ url })
+        const data = await fetchJsonWithTimeout(`/api/eeat-scan?${params.toString()}`, 45000)
+        results.push(data as EeatScanResponse)
+      }
+
+      setEeatBatchResults(results)
+    } catch (error) {
+      setEeatBatchError(error instanceof Error ? error.message : 'Batch EEAT scan failed.')
+    } finally {
+      setIsBatchScanningEeat(false)
+    }
+  }
+
+  const exportEeatJson = (results: EeatScanResponse[], fileName: string) => {
+    if (results.length === 0) return
+    downloadFile(
+      fileName,
+      'application/json',
+      JSON.stringify(results.length === 1 ? results[0] : results, null, 2),
+    )
+  }
+
+  const exportEeatCsv = (results: EeatScanResponse[], fileName: string) => {
+    if (results.length === 0) return
+
+    const rows = results.flatMap((result) =>
+      result.analysis.categories.map((category) => ({
+        url: result.url,
+        pageTitle: result.analysis.title,
+        overallScore: result.analysis.score,
+        criterion: category.label,
+        earned: category.earned,
+        max: category.max,
+        confidence: category.confidence,
+        summary: category.summary,
+        findings: category.findings.join(' | '),
+        gaps: category.gaps.join(' | '),
+        recommendation: category.recommendation,
+      })),
+    )
+
+    const headers = Object.keys(rows[0] ?? {})
+    const csv = [
+      headers.join(','),
+      ...rows.map((row) =>
+        headers
+          .map((header) => escapeCsvValue(String(row[header as keyof typeof row] ?? '')))
+          .join(','),
+      ),
+    ].join('\n')
+
+    downloadFile(fileName, 'text/csv;charset=utf-8', csv)
   }
 
   const runBulkPageScans = async () => {
@@ -447,6 +577,13 @@ function App() {
   }
 
   const scanOverrideMeta = getOverrideMeta(scanOverride)
+  const eeatEvidenceById = useMemo(() => {
+    const blocks = eeatResult?.analysis.evidenceBlocks ?? []
+    return blocks.reduce<Record<string, EeatEvidenceBlock>>((map, block) => {
+      map[block.id] = block
+      return map
+    }, {})
+  }, [eeatResult])
 
   return (
     <main className="app-shell app-layout">
@@ -1021,7 +1158,7 @@ function App() {
                 <p className="panel-kicker">EEAT Scanner</p>
                 <h2>Scan a page for trust and authority signals</h2>
                 <p className="panel-copy">
-                  This tool fetches the page, reviews visible content and media, checks linked trust pages, and highlights which EEAT signals are present or missing.
+                  This tool audits only the page you enter. It reviews visible content, media, links, markup, and writing signals on that exact URL, then scores each EEAT criterion with evidence, gaps, and recommendations.
                 </p>
               </div>
               <div className="toolbar-actions eeat-toolbar-actions">
@@ -1034,6 +1171,89 @@ function App() {
                 <button type="button" onClick={() => void runEeatScan(eeatUrl)}>
                   {isScanningEeat ? 'Scanning page...' : 'Run EEAT scan'}
                 </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!eeatResult}
+                  onClick={() => eeatResult ? exportEeatJson([eeatResult], 'eeat-audit.json') : undefined}
+                >
+                  Export JSON
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!eeatResult}
+                  onClick={() => eeatResult ? exportEeatCsv([eeatResult], 'eeat-audit.csv') : undefined}
+                >
+                  Export CSV
+                </button>
+              </div>
+            </div>
+            <div className="panel-subsection eeat-batch-panel">
+              <div className="subsection-heading">
+                <div>
+                  <p className="panel-kicker">Batch audit</p>
+                  <h3>Scan a list of URLs</h3>
+                </div>
+              </div>
+              <div className="findings-list">
+                <label className="input-block">
+                  <span>URLs, one per line</span>
+                  <textarea
+                    value={eeatBatchInput}
+                    onChange={(event) => setEeatBatchInput(event.target.value)}
+                    placeholder={'https://example.com/page-one\nhttps://example.com/page-two'}
+                  />
+                </label>
+                <div className="toolbar-actions">
+                  <button type="button" onClick={() => void runBatchEeatScan()}>
+                    {isBatchScanningEeat ? 'Scanning list...' : 'Run batch scan'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={eeatBatchResults.length === 0}
+                    onClick={() => exportEeatJson(eeatBatchResults, 'eeat-batch-audit.json')}
+                  >
+                    Export batch JSON
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={eeatBatchResults.length === 0}
+                    onClick={() => exportEeatCsv(eeatBatchResults, 'eeat-batch-audit.csv')}
+                  >
+                    Export batch CSV
+                  </button>
+                </div>
+                {eeatBatchError ? <p className="error-text">{eeatBatchError}</p> : null}
+                {eeatBatchResults.length > 0 ? (
+                  <div className="opportunity-table-wrap">
+                    <table className="opportunity-table">
+                      <thead>
+                        <tr>
+                          <th>URL</th>
+                          <th>EEAT score</th>
+                          <th>Weakest criterion</th>
+                          <th>Top action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {eeatBatchResults.map((result) => {
+                          const weakest = [...result.analysis.categories].sort((left, right) => (left.earned / left.max) - (right.earned / right.max))[0]
+                          return (
+                            <tr key={result.url}>
+                              <td className="url-cell">{result.url}</td>
+                              <td>{result.analysis.score}</td>
+                              <td>{weakest?.label ?? 'n/a'}</td>
+                              <td>{result.analysis.actionPlan[0]?.recommendation ?? 'No urgent fixes surfaced.'}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
@@ -1054,6 +1274,36 @@ function App() {
                       <strong>{eeatResult.analysis.score}</strong>
                     </div>
                   </div>
+
+                  <div className="queue-summary">
+                    <span>Page-only audit</span>
+                    <span>{eeatResult.analysis.formula.earnedPoints} of {eeatResult.analysis.formula.totalPoints} points earned</span>
+                    <span>{eeatResult.analysis.categories.length} rubric criteria reviewed</span>
+                    <span>{eeatResult.analysis.evidenceCoverage}</span>
+                  </div>
+
+                    {eeatResult.analysis.actionPlan.length > 0 ? (
+                      <div className="panel-subsection eeat-action-plan">
+                        <div className="subsection-heading">
+                          <div>
+                            <p className="panel-kicker">Quick Wins</p>
+                            <h3>Top 5 EEAT quick wins</h3>
+                          </div>
+                        </div>
+                        <div className="findings-list compact-findings">
+                          {eeatResult.analysis.actionPlan.map((action) => (
+                            <article key={`${action.priority}-${action.label}`} className="finding-card severity-medium">
+                              <div className="finding-topline">
+                                <span>priority {action.priority}</span>
+                                <h4>{action.label}</h4>
+                              </div>
+                              <p><strong>Why:</strong> {action.reason}</p>
+                              <p><strong>Do next:</strong> {action.recommendation}</p>
+                            </article>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
 
                   <div className="metric-grid">
                     <article className="metric-card">
@@ -1082,53 +1332,39 @@ function App() {
                 <article className="panel preview-panel">
                   <div className="subsection-heading">
                     <div>
-                      <p className="panel-kicker">Strengths</p>
-                      <h3>Signals found</h3>
+                      <p className="panel-kicker">Visual review</p>
+                      <h3>Rendered page capture</h3>
                     </div>
                   </div>
-                  <div className="findings-list">
-                    {eeatResult.analysis.strengths.length > 0 ? eeatResult.analysis.strengths.map((strength) => (
-                      <article key={strength} className="finding-card severity-low">
-                        <div className="finding-topline">
-                          <span>present</span>
-                          <h4>{strength}</h4>
+                  {eeatResult.analysis.visualCapture?.available && eeatResult.analysis.visualCapture.screenshotDataUrl ? (
+                    <div className="eeat-visual-wrap">
+                      <img className="eeat-visual" src={eeatResult.analysis.visualCapture.screenshotDataUrl} alt="Rendered page screenshot for EEAT review" />
+                      <p className="mini-note">{eeatResult.analysis.visualCapture.note}</p>
+                      {eeatResult.analysis.evidenceBlocks.length > 0 ? (
+                        <div className="eeat-evidence-grid">
+                          {eeatResult.analysis.evidenceBlocks.map((block) => (
+                            <article key={block.id} className="finding-card severity-low evidence-card">
+                              <div className="finding-topline">
+                                <span>evidence</span>
+                                <h4>{block.label}</h4>
+                              </div>
+                              <img className="eeat-evidence-image" src={block.screenshotDataUrl} alt={block.label} />
+                              <p>{block.note}</p>
+                              {block.matchedText ? <p className="mini-note">Matched text: {block.matchedText}</p> : null}
+                            </article>
+                          ))}
                         </div>
-                      </article>
-                    )) : (
-                      <article className="finding-card severity-medium">
-                        <div className="finding-topline">
-                          <span>limited</span>
-                          <h4>No strong EEAT strengths stood out yet</h4>
-                        </div>
-                      </article>
-                    )}
-                  </div>
-                </article>
-
-                <article className="panel preview-panel">
-                  <div className="subsection-heading">
-                    <div>
-                      <p className="panel-kicker">Gaps</p>
-                      <h3>Signals missing or weak</h3>
+                      ) : null}
                     </div>
-                  </div>
-                  <div className="findings-list">
-                    {eeatResult.analysis.priorities.length > 0 ? eeatResult.analysis.priorities.map((gap) => (
-                      <article key={gap} className="finding-card severity-medium">
-                        <div className="finding-topline">
-                          <span>priority</span>
-                          <h4>{gap}</h4>
-                        </div>
-                      </article>
-                    )) : (
-                      <article className="finding-card severity-low">
-                        <div className="finding-topline">
-                          <span>strong</span>
-                          <h4>No major EEAT gaps were detected from this first-pass scan</h4>
-                        </div>
-                      </article>
-                    )}
-                  </div>
+                  ) : (
+                    <article className="finding-card severity-medium">
+                      <div className="finding-topline">
+                        <span>visual</span>
+                        <h4>No screenshot was captured</h4>
+                      </div>
+                      <p>{eeatResult.analysis.visualCapture?.note ?? 'Visual capture was not available for this scan.'}</p>
+                    </article>
+                  )}
                 </article>
 
                 <article className="panel preview-panel">
@@ -1169,6 +1405,18 @@ function App() {
                       <span>Heading count</span>
                       <small>{eeatResult.analysis.pageSignals.headingCount} headings detected on the page</small>
                     </article>
+                    <article className="setting-card">
+                      <span>Authority links</span>
+                      <small>{eeatResult.analysis.pageSignals.authoritativeOutboundLinkCount} authoritative outbound link(s) visible on the page</small>
+                    </article>
+                    <article className="setting-card">
+                      <span>Contact links on page</span>
+                      <small>{eeatResult.analysis.pageSignals.contactLinkCount} unique About, Contact, Team, or location link(s) visible on the page</small>
+                    </article>
+                    <article className="setting-card">
+                      <span>Policy links on page</span>
+                      <small>{eeatResult.analysis.pageSignals.policyLinkCount} unique Privacy, Terms, warranty, or policy link(s) visible on the page</small>
+                    </article>
                   </div>
                 </section>
 
@@ -1194,6 +1442,7 @@ function App() {
                           <h4>{category.label}</h4>
                         </div>
                         <p>{category.earned} / {category.max} points</p>
+                        <span className={`confidence-pill confidence-${category.confidence}`}>{category.confidence} confidence</span>
                       </article>
                     ))}
                   </div>
@@ -1208,51 +1457,77 @@ function App() {
 
           {eeatResult ? (
             <section className="panel output-panel workspace-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="panel-kicker">EEAT categories</p>
-                  <h2>Signal-by-signal breakdown</h2>
-                </div>
-                <p className="panel-copy">Each section below is scored independently so you can see what is helping trust and what still needs work.</p>
-              </div>
-
-              <div className="dashboard-list eeat-category-grid">
-                {eeatResult.analysis.categories.map((category) => (
-                  <article key={category.id} className="dashboard-card eeat-card">
-                    <div className="dashboard-header">
-                      <div>
-                        <span className="dashboard-score">{category.earned}/{category.max}</span>
-                        <h4>{category.label}</h4>
-                      </div>
+              <details className="disclosure-panel">
+                <summary>Detailed Signal Breakdown</summary>
+                <div className="disclosure-body">
+                  <div className="panel-heading">
+                    <div>
+                      <p className="panel-kicker">EEAT categories</p>
+                      <h2>Signal-by-signal breakdown</h2>
                     </div>
-                    <p className="dashboard-reason">{category.summary}</p>
-                    <div className="findings-list compact-findings">
-                      {category.findings.map((item) => (
-                        <article key={`${category.id}-${item}`} className="finding-card severity-low">
-                          <div className="finding-topline">
-                            <span>found</span>
-                            <h4>{item}</h4>
+                    <p className="panel-copy">Open this when you want the full evidence-by-evidence rubric, beyond the top 5 quick wins.</p>
+                  </div>
+
+                  <div className="dashboard-list eeat-category-grid">
+                    {eeatResult.analysis.categories.map((category) => (
+                      <article key={category.id} className="dashboard-card eeat-card">
+                        <div className="dashboard-header">
+                          <div>
+                            <span className="dashboard-score">{category.earned}/{category.max}</span>
+                            <h4>{category.label}</h4>
                           </div>
-                        </article>
-                      ))}
-                      {category.gaps.map((item) => (
-                        <article key={`${category.id}-gap-${item}`} className="finding-card severity-medium">
-                          <div className="finding-topline">
-                            <span>gap</span>
-                            <h4>{item}</h4>
+                          <span className={`confidence-pill confidence-${category.confidence}`}>{category.confidence} confidence</span>
+                        </div>
+                        <p className="dashboard-reason">{category.summary}</p>
+                        {category.evidenceIds.length > 0 ? (
+                          <div className="eeat-inline-evidence">
+                            {category.evidenceIds.map((evidenceId) => {
+                              const block = eeatEvidenceById[evidenceId]
+                              if (!block) return null
+
+                              return (
+                                <article key={`${category.id}-${evidenceId}`} className="finding-card severity-low evidence-card">
+                                  <div className="finding-topline">
+                                    <span>visual proof</span>
+                                    <h4>{block.label}</h4>
+                                  </div>
+                                  <img className="eeat-evidence-image" src={block.screenshotDataUrl} alt={block.label} />
+                                  <p>{block.note}</p>
+                                  {block.matchedText ? <p className="mini-note">Matched text: {block.matchedText}</p> : null}
+                                </article>
+                              )
+                            })}
                           </div>
-                        </article>
-                      ))}
-                      <article className="finding-card severity-low">
-                        <div className="finding-topline">
-                          <span>recommendation</span>
-                          <h4>{category.recommendation}</h4>
+                        ) : null}
+                        <div className="findings-list compact-findings">
+                          {category.findings.map((item) => (
+                            <article key={`${category.id}-${item}`} className="finding-card severity-low">
+                              <div className="finding-topline">
+                                <span>found</span>
+                                <h4>{item}</h4>
+                              </div>
+                            </article>
+                          ))}
+                          {category.gaps.map((item) => (
+                            <article key={`${category.id}-gap-${item}`} className="finding-card severity-medium">
+                              <div className="finding-topline">
+                                <span>gap</span>
+                                <h4>{item}</h4>
+                              </div>
+                            </article>
+                          ))}
+                          <article className="finding-card severity-low">
+                            <div className="finding-topline">
+                              <span>recommendation</span>
+                              <h4>{category.recommendation}</h4>
+                            </div>
+                          </article>
                         </div>
                       </article>
-                    </div>
-                  </article>
-                ))}
-              </div>
+                    ))}
+                  </div>
+                </div>
+              </details>
             </section>
           ) : null}
         </section>
@@ -1752,6 +2027,26 @@ function getOverrideMeta(override: OverrideChoice) {
     default:
       return { adjustment: 0, verdict: 'Auto review: using the model score.', note: 'No manual override applied.' }
   }
+}
+
+function downloadFile(fileName: string, mimeType: string, contents: string) {
+  const blob = new Blob([contents], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
+function escapeCsvValue(value: string) {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+
+  return value
 }
 
 function normalizeHeader(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() }
