@@ -7,10 +7,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+tmp-logs/
 
 # Environment
 .env
 .env.*
+server/data/
 
 # OS / Editor
 .DS_Store

@@ -3,11 +3,14 @@ import * as cheerio from 'cheerio'
 import { chromium } from 'playwright-core'
 import fs from 'node:fs'
 import {
+  enqueueAnswerVisibilityRerun,
+  enqueueAnswerVisibilityRun,
   exportAnswerVisibilityCsv,
+  getAnswerVisibilityJob,
   getAnswerVisibilityOverview,
+  getProviderHealthStatus,
   listCampaigns,
-  rerunAnswerVisibilityChecks,
-  runAnswerVisibilityChecks,
+  startAnswerVisibilityWorker,
 } from './lib/answer-visibility-service.mjs'
 
 const app = express()
@@ -93,12 +96,19 @@ app.get('/api/gemini-status', (_request, response) => {
   })
 })
 
+app.get('/api/providers/health', async (request, response) => {
+  response.json(await getProviderHealthStatus({
+    forceRefresh: String(request.query.refresh ?? '') === 'true',
+  }))
+})
+
 app.get('/api/answer-visibility/campaigns', (_request, response) => {
   response.json({ campaigns: listCampaigns() })
 })
 
 app.get('/api/answer-visibility/records', (request, response) => {
   response.json(getAnswerVisibilityOverview({
+    jobId: request.query.jobId ? String(request.query.jobId) : '',
     campaignId: request.query.campaignId ? String(request.query.campaignId) : '',
     projectTag: request.query.projectTag ? String(request.query.projectTag) : '',
     intent: request.query.intent ? String(request.query.intent) : '',
@@ -107,11 +117,13 @@ app.get('/api/answer-visibility/records', (request, response) => {
     mentionStatus: request.query.mentionStatus ? String(request.query.mentionStatus) : '',
     brandId: request.query.brandId ? String(request.query.brandId) : '',
     competitorId: request.query.competitorId ? String(request.query.competitorId) : '',
+    latestOnly: String(request.query.latestOnly ?? 'true') !== 'false',
   }))
 })
 
 app.get('/api/answer-visibility/export.csv', (request, response) => {
   const csv = exportAnswerVisibilityCsv({
+    jobId: request.query.jobId ? String(request.query.jobId) : '',
     campaignId: request.query.campaignId ? String(request.query.campaignId) : '',
     projectTag: request.query.projectTag ? String(request.query.projectTag) : '',
     intent: request.query.intent ? String(request.query.intent) : '',
@@ -120,6 +132,7 @@ app.get('/api/answer-visibility/export.csv', (request, response) => {
     mentionStatus: request.query.mentionStatus ? String(request.query.mentionStatus) : '',
     brandId: request.query.brandId ? String(request.query.brandId) : '',
     competitorId: request.query.competitorId ? String(request.query.competitorId) : '',
+    latestOnly: String(request.query.latestOnly ?? 'true') !== 'false',
   })
 
   response.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -135,7 +148,7 @@ app.post('/api/answer-visibility/run', async (request, response) => {
       return
     }
 
-    const result = await runAnswerVisibilityChecks({
+    const result = await enqueueAnswerVisibilityRun({
       campaignName: String(request.body?.campaignName ?? ''),
       projectTag: String(request.body?.projectTag ?? ''),
       primaryBrand: request.body?.primaryBrand ?? {},
@@ -160,7 +173,7 @@ app.post('/api/answer-visibility/rerun', async (request, response) => {
       return
     }
 
-    const result = await rerunAnswerVisibilityChecks({
+    const result = await enqueueAnswerVisibilityRerun({
       promptIds,
       providerPreference: String(request.body?.providerPreference ?? 'auto'),
     })
@@ -171,6 +184,16 @@ app.post('/api/answer-visibility/rerun', async (request, response) => {
       error: error instanceof Error ? error.message : 'AI Answer Visibility rerun failed.',
     })
   }
+})
+
+app.get('/api/answer-visibility/jobs/:jobId', (request, response) => {
+  const job = getAnswerVisibilityJob(String(request.params.jobId ?? ''))
+  if (!job) {
+    response.status(404).json({ error: 'Visibility job not found.' })
+    return
+  }
+
+  response.json({ job })
 })
 
 async function handleEeatScan(request, response) {
@@ -235,9 +258,30 @@ async function handleEeatScan(request, response) {
 app.get('/api/eeat-scan', handleEeatScan)
 app.post('/api/eeat-scan', handleEeatScan)
 
+app.use('/api', (request, response) => {
+  response.status(404).json({
+    error: `API route not found: ${request.method} ${request.originalUrl}`,
+  })
+})
+
+app.use((error, request, response, next) => {
+  console.error(`API error on ${request.method} ${request.originalUrl}`, error)
+
+  if (response.headersSent) {
+    next(error)
+    return
+  }
+
+  response.status(error?.status || 500).json({
+    error: error instanceof Error ? error.message : 'Unexpected API failure.',
+  })
+})
+
 const server = app.listen(port, () => {
   console.log(`SEO analysis server listening on http://localhost:${port}`)
 })
+
+startAnswerVisibilityWorker()
 
 server.on('close', () => {
   console.log('SEO analysis server closed')

@@ -13,6 +13,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "better-sqlite3": "^12.8.0",
     "cheerio": "^1.1.2",
     "express": "^5.1.0",
     "playwright-core": "^1.59.1",
