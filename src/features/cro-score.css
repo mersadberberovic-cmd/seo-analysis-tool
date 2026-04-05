@@ -1,0 +1,319 @@
+.cro-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.cro-entry-panel,
+.cro-dashboard-shell {
+  margin-top: 0;
+}
+
+.cro-entry-grid,
+.cro-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 480px);
+  gap: 24px;
+}
+
+.cro-entry-copy,
+.cro-hero-copy,
+.cro-entry-form,
+.cro-hero-visual {
+  display: grid;
+  gap: 12px;
+}
+
+.stacked-field {
+  display: grid;
+  gap: 8px;
+}
+
+.stacked-field span {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #1a4d37;
+}
+
+.stacked-field textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.cro-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cro-screenshot {
+  width: 100%;
+  border-radius: 20px;
+  border: 1px solid #dce7df;
+  box-shadow: 0 14px 40px rgba(17, 51, 35, 0.08);
+}
+
+.cro-grade-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.cro-grade-card {
+  border: 1px solid #dce7df;
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: #f8fcf9;
+  display: grid;
+  gap: 4px;
+}
+
+.cro-grade-card span {
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #5d6b64;
+}
+
+.cro-grade-card strong {
+  font-size: 1.45rem;
+  color: #0f1714;
+}
+
+.cro-grade-excellent {
+  border-color: #97dbb6;
+  background: linear-gradient(180deg, #f4fff8 0%, #e8fbef 100%);
+}
+
+.cro-grade-good {
+  border-color: #b7e2cb;
+  background: linear-gradient(180deg, #f8fffb 0%, #eefaf3 100%);
+}
+
+.cro-grade-mixed {
+  border-color: #eadf9d;
+  background: linear-gradient(180deg, #fffdf5 0%, #faf4df 100%);
+}
+
+.cro-grade-weak {
+  border-color: #efc5b8;
+  background: linear-gradient(180deg, #fff9f7 0%, #fbe9e2 100%);
+}
+
+.cro-gap-callout {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid #dce7df;
+  background: #f8fcf9;
+  display: grid;
+  gap: 4px;
+}
+
+.cro-gap-callout span {
+  font-weight: 700;
+  color: #10211b;
+}
+
+.cro-calibration-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.cro-calibration-callout {
+  border: 1px solid #dce7df;
+  border-radius: 18px;
+  background: #f8fcf9;
+  padding: 16px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.cro-quickwins-grid,
+.cro-checklist-stack,
+.cro-feature-matrix,
+.cro-category-chart,
+.cro-rubric-grid,
+.cro-grade-band-list {
+  display: grid;
+  gap: 12px;
+}
+
+.cro-rubric-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.cro-quickwin-card,
+.cro-checklist-card {
+  border: 1px solid #dce7df;
+  border-radius: 18px;
+  background: #fdfefe;
+  padding: 16px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.cro-quickwin-card h4,
+.cro-checklist-card strong {
+  margin: 0;
+}
+
+.cro-quickwin-topline,
+.cro-checklist-header,
+.cro-scoreboard-row,
+.cro-category-bar-row,
+.cro-feature-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.cro-checklist-header > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.cro-checklist-number {
+  font-size: 0.78rem;
+  color: #617169;
+}
+
+.cro-scoreboard,
+.cro-coverage-summary {
+  display: grid;
+  gap: 14px;
+}
+
+.cro-scoreboard-row p {
+  margin: 4px 0 0;
+  color: #607066;
+  font-size: 0.85rem;
+  word-break: break-word;
+}
+
+.cro-scoreboard-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: #e8efeb;
+  overflow: hidden;
+  flex: 1;
+  min-width: 120px;
+  margin-top: 10px;
+}
+
+.cro-scoreboard-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.cro-scoreboard-excellent {
+  background: linear-gradient(90deg, #1f8a5c 0%, #44bf7c 100%);
+}
+
+.cro-scoreboard-good {
+  background: linear-gradient(90deg, #2f9a66 0%, #77cc93 100%);
+}
+
+.cro-scoreboard-mixed {
+  background: linear-gradient(90deg, #d3a535 0%, #efcf70 100%);
+}
+
+.cro-scoreboard-weak {
+  background: linear-gradient(90deg, #c76a4a 0%, #e9987c 100%);
+}
+
+.cro-scoreboard-stats {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  min-width: 48px;
+}
+
+.cro-category-row {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.cro-category-bars {
+  display: grid;
+  gap: 10px;
+}
+
+.cro-category-bar-row span:first-child {
+  min-width: 96px;
+  font-size: 0.85rem;
+  color: #4f5f57;
+}
+
+.cro-feature-state-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.cro-feature-pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 1px solid #dce7df;
+  background: #f8fcf9;
+}
+
+.cro-feature-found {
+  border-color: #b7e2cb;
+  background: #edf9f1;
+  color: #155236;
+}
+
+.cro-feature-partial {
+  border-color: #eadf9d;
+  background: #faf4df;
+  color: #6a5412;
+}
+
+.cro-feature-missing {
+  border-color: #efc5b8;
+  background: #fbe9e2;
+  color: #7a3621;
+}
+
+.cro-checklist-card.found {
+  border-color: #c7e8d4;
+}
+
+.cro-checklist-card.partial {
+  border-color: #eadf9d;
+}
+
+.cro-checklist-card.missing {
+  border-color: #efc5b8;
+}
+
+.cro-filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 1200px) {
+  .cro-entry-grid,
+  .cro-hero-grid,
+  .cro-category-row,
+  .cro-calibration-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cro-grade-strip {
+    grid-template-columns: 1fr;
+  }
+}

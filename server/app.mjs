@@ -12,6 +12,7 @@ import {
   listCampaigns,
   startAnswerVisibilityWorker,
 } from './lib/answer-visibility-service.mjs'
+import { scanCroExperience } from './lib/cro-score-service.mjs'
 
 const app = express()
 const port = 4174
@@ -194,6 +195,30 @@ app.get('/api/answer-visibility/jobs/:jobId', (request, response) => {
   }
 
   response.json({ job })
+})
+
+app.post('/api/cro-score/scan', async (request, response) => {
+  try {
+    const url = String(request.body?.url ?? '').trim()
+    const competitorUrls = Array.isArray(request.body?.competitorUrls)
+      ? request.body.competitorUrls.map((item) => String(item).trim()).filter(Boolean)
+      : []
+    const benchmarkUrls = Array.isArray(request.body?.benchmarkUrls)
+      ? request.body.benchmarkUrls.map((item) => String(item).trim()).filter(Boolean)
+      : []
+
+    if (!url) {
+      response.status(400).json({ error: 'A primary URL is required for CRO scoring.' })
+      return
+    }
+
+    const result = await scanCroExperience({ url, competitorUrls, benchmarkUrls })
+    response.json(result)
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'CRO score scan failed.',
+    })
+  }
 })
 
 async function handleEeatScan(request, response) {

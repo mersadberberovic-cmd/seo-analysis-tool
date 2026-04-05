@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react'
 import * as XLSX from 'xlsx'
 import './App.css'
 import { AnswerVisibilityTracker } from './features/AnswerVisibilityTracker'
+import { CroScoreOptimization } from './features/CroScoreOptimization'
 
 type Severity = 'high' | 'medium' | 'low'
 type RankingStrategy = 'second-page-first' | 'second-page-only' | 'below-page-two'
@@ -91,7 +92,7 @@ type PageScanResponse = {
   }
 }
 
-type ToolId = 'onpage' | 'eeat' | 'answer-visibility'
+type ToolId = 'onpage' | 'eeat' | 'answer-visibility' | 'cro'
 type EeatConfidence = 'high' | 'medium' | 'low'
 
 type EeatEvidenceBlock = {
@@ -770,6 +771,21 @@ function App() {
       ]
     }
 
+    if (activeTool === 'cro') {
+      return [
+        {
+          title: 'CRO',
+          links: [
+            { label: 'Scan input', id: 'cro-root' },
+            { label: 'Overview', id: 'cro-overview' },
+            { label: 'Quick wins', id: 'cro-quick-wins' },
+            { label: 'Comparison', id: 'cro-comparison' },
+            { label: 'Checklist', id: 'cro-checklist' },
+          ],
+        },
+      ]
+    }
+
     return [
       {
         title: 'EEAT Review',
@@ -816,6 +832,15 @@ function App() {
         'Citation presence',
         'Mention share',
         'Historical runs',
+      ]
+    }
+
+    if (activeTool === 'cro') {
+      return [
+        'CRO grade',
+        'Checklist scoring',
+        'Competitor comparison',
+        'Quick wins',
       ]
     }
 
@@ -884,6 +909,13 @@ function App() {
             >
               Reports
             </button>
+            <button
+              type="button"
+              className={`product-nav-link ${activeTool === 'cro' ? 'active' : ''}`}
+              onClick={() => setActiveTool('cro')}
+            >
+              CRO
+            </button>
           <button type="button" className="product-nav-link">
             Settings
           </button>
@@ -932,6 +964,14 @@ function App() {
             <span>AI Answer Visibility Tracker</span>
             <small>Track brand visibility in AI answers</small>
           </button>
+          <button
+            type="button"
+            className={`tool-nav-button tool-nav-linklike ${activeTool === 'cro' ? 'active' : ''}`}
+            onClick={() => setActiveTool('cro')}
+          >
+            <span>CRO Score &amp; Optimization</span>
+            <small>Grade pages and compare CRO against competitors</small>
+          </button>
         </div>
         <div className="tool-sidebar-sections">
           {workspaceSections.map((section) => (
@@ -958,7 +998,9 @@ function App() {
                   ? 'Onpage Optimization Planning Tool'
                   : activeTool === 'eeat'
                     ? 'EEAT Tool'
-                    : 'AI Answer Visibility Tracker'}
+                    : activeTool === 'answer-visibility'
+                      ? 'AI Answer Visibility Tracker'
+                      : 'CRO Score & Optimization'}
               </p>
               <h1 className="topbar-title">
                 {activeTool === 'onpage'
@@ -967,7 +1009,9 @@ function App() {
                   : 'Opportunity workspace'
                   : activeTool === 'eeat'
                     ? 'Page-level EEAT analysis'
-                    : 'AI Answer Visibility Tracker'}
+                    : activeTool === 'answer-visibility'
+                      ? 'AI Answer Visibility Tracker'
+                      : 'CRO Score & Optimization'}
               </h1>
             </div>
             {activeTool === 'eeat' && geminiStatus?.availableFromEnv ? (
@@ -997,14 +1041,18 @@ function App() {
                 ? 'Planning workspace'
                 : activeTool === 'eeat'
                   ? 'EEAT workspace'
-                  : 'AI answer visibility workspace'}
+                  : activeTool === 'answer-visibility'
+                    ? 'AI answer visibility workspace'
+                    : 'CRO scoring workspace'}
             </strong>
             <p>
               {activeTool === 'onpage'
                 ? 'The center canvas holds results, while the rails keep inputs and navigation easy to reach.'
                 : activeTool === 'eeat'
                   ? 'Review one page at a time with a cleaner audit shell, visual proof, and optional AI enhancement.'
-                  : 'Track how your brand, competitors, and cited domains appear across AI-generated answers and preserve every run historically.'}
+                  : activeTool === 'answer-visibility'
+                    ? 'Track how your brand, competitors, and cited domains appear across AI-generated answers and preserve every run historically.'
+                    : 'Score pages against the CRO checklist, surface quick wins, and compare your page against competitor pages visually.'}
             </p>
           </div>
           <div className="workspace-filters">
@@ -1726,6 +1774,8 @@ function App() {
         </>
       ) : activeTool === 'answer-visibility' ? (
         <AnswerVisibilityTracker />
+      ) : activeTool === 'cro' ? (
+        <CroScoreOptimization />
       ) : (
         <section className="eeat-shell">
           <section id="eeat-batch-panel" className="panel toolbar-panel compact-toolbar-panel eeat-entry-panel">
