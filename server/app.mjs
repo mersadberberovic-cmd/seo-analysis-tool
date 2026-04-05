@@ -206,13 +206,14 @@ app.post('/api/cro-score/scan', async (request, response) => {
     const benchmarkUrls = Array.isArray(request.body?.benchmarkUrls)
       ? request.body.benchmarkUrls.map((item) => String(item).trim()).filter(Boolean)
       : []
+    const checklistMode = String(request.body?.checklistMode ?? 'auto').trim()
 
     if (!url) {
       response.status(400).json({ error: 'A primary URL is required for CRO scoring.' })
       return
     }
 
-    const result = await scanCroExperience({ url, competitorUrls, benchmarkUrls })
+    const result = await scanCroExperience({ url, competitorUrls, benchmarkUrls, checklistMode })
     response.json(result)
   } catch (error) {
     response.status(500).json({

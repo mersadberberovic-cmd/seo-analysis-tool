@@ -45,6 +45,9 @@ type CroPageAnalysis = {
   url: string
   title: string
   pageType: string
+  checklistMode: string
+  checklistModeLabel: string
+  appliedAreas: string[]
   score: number
   grade: string
   screenshotDataUrl: string
@@ -113,7 +116,6 @@ type CroResponse = {
   }
   primary: CroPageAnalysis
   competitors: CroPageAnalysis[]
-  benchmarks: CroPageAnalysis[]
   comparison: CroComparison
   calibration: {
     benchmarkCount: number
@@ -198,7 +200,7 @@ function escapeCsvValue(value: string) {
 export function CroScoreOptimization() {
   const [url, setUrl] = useState('')
   const [competitorUrls, setCompetitorUrls] = useState('')
-  const [benchmarkUrls, setBenchmarkUrls] = useState('')
+  const [checklistMode, setChecklistMode] = useState('auto')
   const [result, setResult] = useState<CroResponse | null>(null)
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -285,11 +287,8 @@ export function CroScoreOptimization() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           url: url.trim(),
+          checklistMode,
           competitorUrls: competitorUrls
-            .split(/\r?\n/)
-            .map((item) => item.trim())
-            .filter(Boolean),
-          benchmarkUrls: benchmarkUrls
             .split(/\r?\n/)
             .map((item) => item.trim())
             .filter(Boolean),
@@ -328,21 +327,26 @@ export function CroScoreOptimization() {
               />
             </label>
             <label className="stacked-field">
+              <span>Checklist mode</span>
+              <select value={checklistMode} onChange={(event) => setChecklistMode(event.target.value)}>
+                <option value="auto">Auto detect</option>
+                <option value="service">Service page</option>
+                <option value="homepage">Homepage</option>
+                <option value="landing">Landing page</option>
+                <option value="demo">Demo page</option>
+                <option value="pricing">Pricing page</option>
+                <option value="product">Product page</option>
+                <option value="blog">Blog page</option>
+                <option value="template">Template page</option>
+              </select>
+            </label>
+            <label className="stacked-field">
               <span>Competitor pages to compare</span>
               <textarea
                 rows={4}
                 value={competitorUrls}
                 onChange={(event) => setCompetitorUrls(event.target.value)}
                 placeholder={'https://competitor-one.com/pricing\nhttps://competitor-two.com/pricing'}
-              />
-            </label>
-            <label className="stacked-field">
-              <span>Benchmark pages for score calibration</span>
-              <textarea
-                rows={4}
-                value={benchmarkUrls}
-                onChange={(event) => setBenchmarkUrls(event.target.value)}
-                placeholder={'https://benchmark-one.com/pricing\nhttps://benchmark-two.com/pricing\nhttps://benchmark-three.com/pricing'}
               />
             </label>
             <div className="cro-entry-actions">
@@ -398,16 +402,20 @@ export function CroScoreOptimization() {
                       <span>Page type</span>
                       <strong>{result.primary.pageType}</strong>
                     </div>
+                    <div className="cro-grade-card">
+                      <span>Checklist mode</span>
+                      <strong>{result.primary.checklistModeLabel}</strong>
+                    </div>
                     <div className={`cro-grade-card cro-grade-${getScoreTone(result.calibration.calibratedScore)}`}>
-                      <span>Calibrated grade</span>
+                      <span>Checklist-aligned grade</span>
                       <strong>{result.calibration.calibratedGrade}</strong>
                     </div>
                     <div className={`cro-grade-card cro-grade-${getScoreTone(result.calibration.calibratedScore)}`}>
-                      <span>Calibrated score</span>
+                      <span>Checklist-aligned score</span>
                       <strong>{result.calibration.calibratedScore}/100</strong>
                     </div>
                     <div className="cro-grade-card">
-                      <span>Benchmark position</span>
+                      <span>Checklist position</span>
                       <strong>{result.calibration.positionLabel}</strong>
                     </div>
                   </div>
@@ -447,6 +455,11 @@ export function CroScoreOptimization() {
                       <small>{biggestGapCategory.score}/100 for this checklist section</small>
                     </div>
                   ) : null}
+                  <div className="cro-gap-callout">
+                    <strong>Checklist areas used</strong>
+                    <span>{result.primary.appliedAreas.join(', ')}</span>
+                    <small>The score only uses these checklist sections plus Site Wide.</small>
+                  </div>
                 </article>
 
                 <article id="cro-quick-wins" className="panel preview-panel dashboard-module-panel">
@@ -471,66 +484,6 @@ export function CroScoreOptimization() {
                       </article>
                     ))}
                   </div>
-                </article>
-              </section>
-
-              <section id="cro-calibration" className="dashboard-module-grid">
-                <article className="panel preview-panel dashboard-module-panel dashboard-module-wide">
-                  <div className="subsection-heading">
-                    <div>
-                      <p className="panel-kicker">Calibration</p>
-                      <h3>Benchmark-relative CRO position</h3>
-                    </div>
-                  </div>
-                  {result.calibration.benchmarkCount > 0 ? (
-                    <div className="cro-calibration-grid">
-                      <div className="metric-grid compact-metric-grid">
-                        <article className="metric-card">
-                          <span>Benchmark median</span>
-                          <strong>{result.calibration.benchmarkMedianScore ?? '-'}</strong>
-                          <small>Middle score across your selected benchmark pages.</small>
-                        </article>
-                        <article className="metric-card">
-                          <span>Benchmark leader</span>
-                          <strong>{result.calibration.benchmarkTopScore ?? '-'}</strong>
-                          <small>Strongest page in the benchmark set.</small>
-                        </article>
-                        <article className="metric-card">
-                          <span>Delta vs median</span>
-                          <strong>
-                            {result.calibration.primaryVsMedian === null
-                              ? '-'
-                              : `${result.calibration.primaryVsMedian > 0 ? '+' : ''}${result.calibration.primaryVsMedian}`}
-                          </strong>
-                          <small>How far this page sits above or below the benchmark median.</small>
-                        </article>
-                        <article className="metric-card">
-                          <span>Delta vs leader</span>
-                          <strong>
-                            {result.calibration.primaryVsTop === null
-                              ? '-'
-                              : `${result.calibration.primaryVsTop > 0 ? '+' : ''}${result.calibration.primaryVsTop}`}
-                          </strong>
-                          <small>Gap between this page and the strongest benchmark page.</small>
-                        </article>
-                      </div>
-                      <div className="cro-calibration-callout">
-                        <strong>{result.calibration.positionLabel}</strong>
-                        <p>{result.calibration.percentileLabel}</p>
-                        <div className="findings-list compact-findings">
-                          {result.calibration.notes.map((note) => (
-                            <article key={note} className="finding-card severity-low">
-                              <p>{note}</p>
-                            </article>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="empty-state">
-                      <p>Add 3-5 benchmark URLs to calibrate the CRO score against pages you trust as reference standards.</p>
-                    </div>
-                  )}
                 </article>
               </section>
 
@@ -592,68 +545,6 @@ export function CroScoreOptimization() {
                 </article>
               </section>
 
-              {result.calibration.benchmarkCount > 0 ? (
-                <section id="cro-benchmark-distribution" className="dashboard-module-grid">
-                  <article className="panel preview-panel dashboard-module-panel dashboard-module-wide">
-                    <div className="subsection-heading">
-                      <div>
-                        <p className="panel-kicker">Benchmarks</p>
-                        <h3>Score distribution vs benchmark pages</h3>
-                      </div>
-                    </div>
-                    <div className="cro-scoreboard">
-                      {result.calibration.scoreDistribution.map((item) => (
-                        <article key={`${item.label}-${item.url}`} className="cro-scoreboard-row">
-                          <div>
-                            <strong>{item.label}</strong>
-                            <p>{item.url}</p>
-                          </div>
-                          <div className="cro-scoreboard-bar">
-                            <span
-                              className={`cro-scoreboard-fill cro-scoreboard-${getScoreTone(item.score)}`}
-                              style={{ width: `${item.score}%` }}
-                            />
-                          </div>
-                          <div className="cro-scoreboard-stats">
-                            <strong>{item.score}</strong>
-                            <span>{item.grade}</span>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-
-                  <article className="panel preview-panel dashboard-module-panel">
-                    <div className="subsection-heading">
-                      <div>
-                        <p className="panel-kicker">Category gaps</p>
-                        <h3>Deltas vs benchmark average</h3>
-                      </div>
-                    </div>
-                    <div className="cro-feature-matrix">
-                      {result.calibration.categoryBenchmarks.map((category) => (
-                        <div key={category.category} className="cro-feature-row">
-                          <strong>{category.category}</strong>
-                          <div className="cro-feature-state-row">
-                            <span className="cro-feature-pill cro-feature-found">You: {category.primaryScore}</span>
-                            <span className="cro-feature-pill cro-feature-partial">
-                              Benchmark avg: {category.benchmarkAverage ?? '-'}
-                            </span>
-                            <span
-                              className={`cro-feature-pill ${
-                                (category.deltaToBenchmarkAverage ?? 0) >= 0 ? 'cro-feature-found' : 'cro-feature-missing'
-                              }`}
-                            >
-                              Delta: {category.deltaToBenchmarkAverage === null ? '-' : `${category.deltaToBenchmarkAverage > 0 ? '+' : ''}${category.deltaToBenchmarkAverage}`}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                </section>
-              ) : null}
-
               <section id="cro-categories" className="panel preview-panel dashboard-module-panel dashboard-module-wide">
                 <div className="subsection-heading">
                   <div>
@@ -690,111 +581,12 @@ export function CroScoreOptimization() {
                 <article className="panel preview-panel dashboard-module-panel">
                   <div className="subsection-heading">
                     <div>
-                      <p className="panel-kicker">Strengths</p>
-                      <h3>What the page already does well</h3>
+                      <p className="panel-kicker">Checklist read</p>
+                      <h3>How the score was interpreted</h3>
                     </div>
-                  </div>
-                  <div className="cro-checklist-stack">
-                    {result.primary.strengths.slice(0, 6).map((item) => (
-                      <article key={item.id} className="cro-checklist-card found">
-                        <div className="cro-checklist-header">
-                          <strong>{item.actionItem}</strong>
-                          <span>{item.pageArea}</span>
-                        </div>
-                        <p>{item.rationale}</p>
-                      </article>
-                    ))}
-                  </div>
-                </article>
-
-                <article className="panel preview-panel dashboard-module-panel">
-                  <div className="subsection-heading">
-                    <div>
-                      <p className="panel-kicker">Coverage</p>
-                      <h3>Automation coverage</h3>
-                    </div>
-                  </div>
-                  <div className="cro-coverage-summary">
-                    <div className="metric-card">
-                      <span>Automated</span>
-                      <strong>{result.primary.automationCoverage.automatedItems}</strong>
-                      <small>Items scored directly from the page scan.</small>
-                    </div>
-                    <div className="metric-card">
-                      <span>Manual review</span>
-                      <strong>{result.primary.automationCoverage.manualItems}</strong>
-                      <small>Checks that still need deeper workflow or historical verification.</small>
-                    </div>
-                    <div className="metric-card">
-                      <span>Checklist total</span>
-                      <strong>{result.checklistSummary.totalItems}</strong>
-                      <small>The full CRO checklist loaded into the scoring engine.</small>
-                    </div>
-                  </div>
-                </article>
-              </section>
-
-              <section id="cro-rubric" className="dashboard-module-grid">
-                <article className="panel preview-panel dashboard-module-panel">
-                  <div className="subsection-heading">
-                    <div>
-                      <p className="panel-kicker">Rubric</p>
-                      <h3>Score weighting</h3>
-                    </div>
-                  </div>
-                  <div className="cro-rubric-grid">
-                    <article className="metric-card">
-                      <span>Found</span>
-                      <strong>{Math.round(result.scoringModel.stateWeights.found * 100)}%</strong>
-                      <small>Full checklist impact weight applied.</small>
-                    </article>
-                    <article className="metric-card">
-                      <span>Partial</span>
-                      <strong>{Math.round(result.scoringModel.stateWeights.partial * 100)}%</strong>
-                      <small>Reduced credit for incomplete implementation.</small>
-                    </article>
-                    <article className="metric-card">
-                      <span>Missing</span>
-                      <strong>{Math.round(result.scoringModel.stateWeights.missing * 100)}%</strong>
-                      <small>No score contribution, becomes opportunity.</small>
-                    </article>
-                  </div>
-                  <div className="cro-rubric-grid">
-                    <article className="metric-card">
-                      <span>High impact</span>
-                      <strong>{result.scoringModel.impactWeights.High}</strong>
-                      <small>Largest influence on the grade.</small>
-                    </article>
-                    <article className="metric-card">
-                      <span>Mid impact</span>
-                      <strong>{result.scoringModel.impactWeights.Mid}</strong>
-                      <small>Moderate effect on the score.</small>
-                    </article>
-                    <article className="metric-card">
-                      <span>Low impact</span>
-                      <strong>{result.scoringModel.impactWeights.Low}</strong>
-                      <small>Smaller optimization effect.</small>
-                    </article>
-                  </div>
-                </article>
-
-                <article className="panel preview-panel dashboard-module-panel">
-                  <div className="subsection-heading">
-                    <div>
-                      <p className="panel-kicker">Grades</p>
-                      <h3>Page-type-aware grading</h3>
-                    </div>
-                  </div>
-                  <div className="cro-grade-band-list">
-                    {result.scoringModel.gradeBands.map((band) => (
-                      <div key={band.grade} className="rail-metric-item">
-                        <span>Grade {band.grade}</span>
-                        <strong>{band.min}+</strong>
-                      </div>
-                    ))}
                   </div>
                   <div className="findings-list compact-findings">
-                    {result.scoringModel.notes.map((note) => (
+                    {result.calibration.notes.map((note) => (
                       <article key={note} className="finding-card severity-low">
                         <p>{note}</p>
                       </article>
@@ -823,7 +615,7 @@ export function CroScoreOptimization() {
                   </div>
                 </div>
                 <div className="cro-checklist-stack">
-                  {filteredChecklist.slice(0, 24).map((item) => (
+                  {filteredChecklist.slice(0, 10).map((item) => (
                     <article key={item.id} className={`cro-checklist-card ${item.state}`}>
                       <div className="cro-checklist-header">
                         <div>
@@ -910,7 +702,7 @@ export function CroScoreOptimization() {
         </>
       ) : (
         <div className="empty-state">
-          <p>Run a CRO scan to grade the page, surface quick wins, and compare it with competitor pages.</p>
+          <p>Run a CRO scan to grade the page against the checklist, surface quick wins, and compare it with competitor pages.</p>
         </div>
       )}
     </section>

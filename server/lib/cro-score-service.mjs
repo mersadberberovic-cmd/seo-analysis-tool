@@ -71,15 +71,16 @@ const SOLUTION_TERMS = /(solution|platform|product|software|tool|automate|stream
 
 let checklistCache = null
 
-export async function scanCroExperience({ url, competitorUrls = [], benchmarkUrls = [] }) {
+export async function scanCroExperience({ url, competitorUrls = [], benchmarkUrls = [], checklistMode = 'auto' }) {
   const checklist = loadCroChecklist()
   const dedupedCompetitors = [...new Set((competitorUrls ?? []).map((item) => String(item).trim()).filter(Boolean))]
-  const dedupedBenchmarks = [...new Set((benchmarkUrls ?? []).map((item) => String(item).trim()).filter(Boolean))]
+  void benchmarkUrls
 
   const primary = await analyzeCroPage({
     url,
     checklist,
     includeScreenshot: true,
+    checklistMode,
   })
 
   const competitors = []
@@ -88,15 +89,7 @@ export async function scanCroExperience({ url, competitorUrls = [], benchmarkUrl
       url: competitorUrl,
       checklist,
       includeScreenshot: false,
-    }))
-  }
-
-  const benchmarks = []
-  for (const benchmarkUrl of dedupedBenchmarks.slice(0, 5)) {
-    benchmarks.push(await analyzeCroPage({
-      url: benchmarkUrl,
-      checklist,
-      includeScreenshot: false,
+      checklistMode,
     }))
   }
 
@@ -118,143 +111,75 @@ export async function scanCroExperience({ url, competitorUrls = [], benchmarkUrl
     },
     primary,
     competitors,
-    benchmarks,
     comparison: buildCroComparison(primary, competitors),
-    calibration: buildCroCalibration(primary, benchmarks),
+    calibration: buildCroCalibration(primary),
   }
 }
 
-function buildCroCalibration(primary, benchmarks) {
-  if (!benchmarks.length) {
-    return {
-      benchmarkCount: 0,
-      matchedBenchmarkCount: 0,
-      benchmarkMedianScore: null,
-      benchmarkTopScore: null,
-      benchmarkBottomScore: null,
-      calibratedScore: primary.score,
-      calibratedGrade: primary.grade,
-      positionLabel: 'No benchmark set yet',
-      percentileLabel: 'Add 3–5 benchmark pages to calibrate this score against real reference pages.',
-      primaryVsMedian: null,
-      primaryVsTop: null,
-      scoreDistribution: [],
-      categoryBenchmarks: [],
-      notes: [
-        'Benchmark calibration compares this page against reference pages you choose, so the grade is anchored to pages you actually care about.',
-      ],
-    }
-  }
-
-  const benchmarkScores = benchmarks.map((item) => item.score).sort((left, right) => left - right)
-  const benchmarkCount = benchmarkScores.length
-  const midpoint = Math.floor(benchmarkCount / 2)
-  const benchmarkMedianScore = benchmarkCount % 2 === 0
-    ? Math.round((benchmarkScores[midpoint - 1] + benchmarkScores[midpoint]) / 2)
-    : benchmarkScores[midpoint]
-  const benchmarkTopScore = benchmarkScores[benchmarkScores.length - 1]
-  const benchmarkBottomScore = benchmarkScores[0]
-  const averageBenchmarkScore = Math.round(
-    benchmarkScores.reduce((sum, value) => sum + value, 0) / benchmarkCount,
+function buildCroCalibration(primary) {
+  const automatedItems = primary.checklistResults.filter(
+    (item) => item.applicable && item.detectorMode === 'automated',
   )
-  const primaryVsMedian = primary.score - benchmarkMedianScore
-  const primaryVsTop = primary.score - benchmarkTopScore
-  const winsAgainstBenchmarks = benchmarks.filter((item) => primary.score >= item.score).length
-  const percentile = Math.round((winsAgainstBenchmarks / benchmarkCount) * 100)
-  const relativeScore =
-    benchmarkTopScore === benchmarkBottomScore
-      ? primary.score
-      : Math.max(
-          0,
-          Math.min(
-            100,
-            35 + (((primary.score - benchmarkBottomScore) / (benchmarkTopScore - benchmarkBottomScore)) * 65),
-          ),
-        )
-  const calibratedScore = Math.round((primary.score * 0.75) + (relativeScore * 0.25))
+  const highImpactItems = automatedItems.filter((item) => item.impact === 'High')
+  const foundHighImpactItems = highImpactItems.filter((item) => item.state === 'found')
+  const lowEffortGaps = automatedItems.filter(
+    (item) => item.state === 'missing' && item.effort === 'Low',
+  )
+  const partialItems = automatedItems.filter((item) => item.state === 'partial')
+  const coverageScore = automatedItems.length
+    ? Math.round((primary.automationCoverage.automatedItems / automatedItems.length) * 100)
+    : 0
+  const highImpactCoverage = highImpactItems.length
+    ? Math.round((foundHighImpactItems.length / highImpactItems.length) * 100)
+    : 0
+  const quickWinPressure = Math.min(100, lowEffortGaps.length * 10)
+  const calibratedScore = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round((primary.score * 0.7) + (highImpactCoverage * 0.2) + (coverageScore * 0.1) - (quickWinPressure * 0.1)),
+    ),
+  )
   const calibratedGrade = getGrade(calibratedScore)
 
-  let positionLabel = 'In line with benchmark pages'
-  if (primary.score > benchmarkTopScore) {
-    positionLabel = 'Ahead of the current benchmark leader'
-  } else if (primary.score === benchmarkTopScore) {
-    positionLabel = 'Matching the current benchmark leader'
-  } else if (primaryVsMedian >= 8) {
-    positionLabel = 'Ahead of benchmark median'
-  } else if (primaryVsMedian <= -8) {
-    positionLabel = 'Behind benchmark median'
+  let positionLabel = 'Checklist fundamentals need work'
+  if (calibratedScore >= 75) {
+    positionLabel = 'Checklist fundamentals are in a strong place'
+  } else if (calibratedScore >= 58) {
+    positionLabel = 'Checklist fundamentals are decent but still uneven'
+  } else if (calibratedScore >= 42) {
+    positionLabel = 'Checklist fundamentals are mixed'
   }
 
-  const percentileLabel =
-    percentile >= 100
-      ? 'This page is currently matching or beating every benchmark page in the set.'
-      : percentile >= 67
-        ? 'This page is above most benchmark pages, but there is still room to close the gap with the leaders.'
-        : percentile >= 34
-          ? 'This page sits around the middle of the benchmark set.'
-          : 'This page is trailing the benchmark set and needs stronger CRO fundamentals.'
-
-  const benchmarkCategoryLookup = new Map()
-  for (const benchmark of benchmarks) {
-    for (const category of benchmark.categoryScores) {
-      const current = benchmarkCategoryLookup.get(category.category) ?? {
-        category: category.category,
-        scores: [],
-      }
-      current.scores.push(category.score)
-      benchmarkCategoryLookup.set(category.category, current)
-    }
-  }
-
-  const categoryBenchmarks = primary.categoryScores.map((category) => {
-    const match = benchmarkCategoryLookup.get(category.category)
-    const benchmarkScoresForCategory = match?.scores ?? []
-    const benchmarkAverage = benchmarkScoresForCategory.length
-      ? Math.round(
-          benchmarkScoresForCategory.reduce((sum, value) => sum + value, 0) / benchmarkScoresForCategory.length,
-        )
-      : null
-
-    return {
-      category: category.category,
-      primaryScore: category.score,
-      benchmarkAverage,
-      deltaToBenchmarkAverage:
-        benchmarkAverage === null ? null : category.score - benchmarkAverage,
-    }
-  })
+  const readinessLabel =
+    lowEffortGaps.length === 0
+      ? 'Most of the obvious low-effort CRO wins are already covered.'
+      : `There are ${lowEffortGaps.length} low-effort gaps still open in the checklist, so the page likely has straightforward CRO improvements available.`
 
   return {
-    benchmarkCount,
-    matchedBenchmarkCount: benchmarks.length,
-    benchmarkMedianScore,
-    benchmarkTopScore,
-    benchmarkBottomScore,
-    averageBenchmarkScore,
+    benchmarkCount: 0,
+    matchedBenchmarkCount: 0,
+    benchmarkMedianScore: null,
+    benchmarkTopScore: null,
+    benchmarkBottomScore: null,
+    averageBenchmarkScore: null,
     calibratedScore,
     calibratedGrade,
     positionLabel,
-    percentileLabel,
-    primaryVsMedian,
-    primaryVsTop,
-    scoreDistribution: [
-      {
-        label: 'Your page',
-        url: primary.url,
-        score: primary.score,
-        grade: primary.grade,
-      },
-      ...benchmarks.map((item, index) => ({
-        label: `Benchmark ${index + 1}`,
-        url: item.url,
-        score: item.score,
-        grade: item.grade,
-      })),
-    ],
-    categoryBenchmarks,
+    percentileLabel: readinessLabel,
+    primaryVsMedian: null,
+    primaryVsTop: null,
+    scoreDistribution: [],
+    categoryBenchmarks: primary.categoryScores.map((category) => ({
+      category: category.category,
+      primaryScore: category.score,
+      benchmarkAverage: null,
+      deltaToBenchmarkAverage: null,
+    })),
     notes: [
-      `Benchmark median score: ${benchmarkMedianScore}. Benchmark leader score: ${benchmarkTopScore}.`,
-      'Calibrated score blends the internal checklist grade with relative standing against your chosen benchmark pages.',
+      `High-impact coverage: ${highImpactCoverage}% of scored high-impact checklist items were fully found.`,
+      `Low-effort missing items: ${lowEffortGaps.length}. Partial items still needing polish: ${partialItems.length}.`,
+      'Calibration is now grounded in checklist coverage and gap pressure instead of asking for separate benchmark pages.',
     ],
   }
 }
@@ -300,9 +225,10 @@ function loadCroChecklist() {
   return checklistCache
 }
 
-async function analyzeCroPage({ url, checklist, includeScreenshot }) {
+async function analyzeCroPage({ url, checklist, includeScreenshot, checklistMode }) {
   const snapshot = await fetchCroSnapshot(url, { includeScreenshot })
-  const applicableAreas = getApplicableAreas(snapshot.pageType)
+  const resolvedChecklistMode = resolveChecklistMode(snapshot.pageType, checklistMode)
+  const applicableAreas = getApplicableAreas(snapshot.pageType, resolvedChecklistMode)
   const signals = deriveCroSignals(snapshot)
 
   const checklistResults = checklist.map((item) => evaluateChecklistItem(item, snapshot, signals, applicableAreas))
@@ -315,6 +241,9 @@ async function analyzeCroPage({ url, checklist, includeScreenshot }) {
     url: snapshot.url,
     title: snapshot.title,
     pageType: snapshot.pageType,
+    checklistMode: resolvedChecklistMode.id,
+    checklistModeLabel: resolvedChecklistMode.label,
+    appliedAreas: [...applicableAreas],
     score,
     grade: getGrade(score),
     screenshotDataUrl: snapshot.screenshotDataUrl ?? '',
@@ -982,9 +911,38 @@ function buildFeatureComparison(primary, competitors) {
   }))
 }
 
-function getApplicableAreas(pageType) {
+const CHECKLIST_MODE_CONFIG = {
+  auto: { id: 'auto', label: 'Auto', areas: null, description: 'Automatically choose the closest checklist area for the page type.' },
+  homepage: { id: 'homepage', label: 'Homepage', areas: ['Homepage'], description: 'Use the homepage items from the checklist.' },
+  pricing: { id: 'pricing', label: 'Pricing Page', areas: ['Pricing Page'], description: 'Use the pricing-page items from the checklist.' },
+  product: { id: 'product', label: 'Product Page', areas: ['Product Page'], description: 'Use the product-page items from the checklist.' },
+  blog: { id: 'blog', label: 'Blog Page', areas: ['Blog Page'], description: 'Use the blog-page items from the checklist.' },
+  demo: { id: 'demo', label: 'Demo Page', areas: ['Demo Page'], description: 'Use the demo-page items from the checklist.' },
+  landing: { id: 'landing', label: 'Landing Page', areas: ['Landing Page'], description: 'Use the landing-page items from the checklist.' },
+  template: { id: 'template', label: 'Template Page', areas: ['Template Page'], description: 'Use the template-page items from the checklist.' },
+  service: {
+    id: 'service',
+    label: 'Service Page',
+    areas: ['Homepage', 'Landing Page', 'Demo Page'],
+    description: 'Use the closest checklist mix for service-business pages: homepage clarity, landing-page conversion focus, and demo-page trust/form checks.',
+  },
+}
+
+function getApplicableAreas(pageType, resolvedChecklistMode) {
   const areas = new Set(['Site Wide'])
+  if (resolvedChecklistMode?.areas?.length) {
+    for (const area of resolvedChecklistMode.areas) {
+      areas.add(area)
+    }
+    return areas
+  }
+
   if (pageType === 'homepage') areas.add('Homepage')
+  if (pageType === 'service') {
+    areas.add('Homepage')
+    areas.add('Landing Page')
+    areas.add('Demo Page')
+  }
   if (pageType === 'pricing') areas.add('Pricing Page')
   if (pageType === 'product') areas.add('Product Page')
   if (pageType === 'blog') areas.add('Blog Page')
@@ -994,12 +952,34 @@ function getApplicableAreas(pageType) {
   return areas
 }
 
+function resolveChecklistMode(pageType, requestedMode) {
+  const normalizedMode = String(requestedMode ?? 'auto').trim().toLowerCase()
+  if (normalizedMode && normalizedMode !== 'auto' && CHECKLIST_MODE_CONFIG[normalizedMode]) {
+    return CHECKLIST_MODE_CONFIG[normalizedMode]
+  }
+
+  if (pageType === 'service') return CHECKLIST_MODE_CONFIG.service
+  if (pageType === 'homepage') return CHECKLIST_MODE_CONFIG.homepage
+  if (pageType === 'pricing') return CHECKLIST_MODE_CONFIG.pricing
+  if (pageType === 'product') return CHECKLIST_MODE_CONFIG.product
+  if (pageType === 'blog') return CHECKLIST_MODE_CONFIG.blog
+  if (pageType === 'demo') return CHECKLIST_MODE_CONFIG.demo
+  if (pageType === 'landing') return CHECKLIST_MODE_CONFIG.landing
+  if (pageType === 'template') return CHECKLIST_MODE_CONFIG.template
+
+  return CHECKLIST_MODE_CONFIG.homepage
+}
+
 function inferCroPageType(parsedUrl, title, bodyText, rendered) {
   const path = parsedUrl.pathname.toLowerCase()
   const combined = `${path} ${title} ${bodyText.slice(0, 2000)}`.toLowerCase()
   if (path === '/' || path === '') return 'homepage'
   if (/pricing|plans/.test(combined)) return 'pricing'
-  if (/blog|article|guide|resources|news/.test(combined)) return 'blog'
+  if (
+    /install|installation|repair|service|services|maintenance|book now|request a quote|free quote|free assessment|licensed team|call us|heat pump/i.test(combined) &&
+    !/blog|article|guide|resources|news/.test(path)
+  ) return 'service'
+  if (/blog|article|guide|resources|news/.test(path) || (/blog|article|guide|resources|news/.test(combined) && /author|published|read more|related articles|table of contents/i.test(combined))) return 'blog'
   if (/demo|contact-sales|book-a-demo|contact/.test(combined)) return 'demo'
   if (/template/.test(combined)) return 'template'
   if (/landing|\/lp\/|\/campaign\//.test(combined) || (rendered.forms.length > 0 && rendered.navLabels.length <= 5 && rendered.ctas.length <= 3)) return 'landing'
