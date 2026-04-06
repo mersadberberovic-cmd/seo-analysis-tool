@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+﻿import { useMemo, useState } from 'react'
 import './cro-score.css'
 
 type CroMetric = {
@@ -30,6 +30,12 @@ type CroChecklistResult = {
   rationale: string
   evidence: string[]
   recommendation: string
+  quickWinRank?: number
+  strategistHeading?: string
+  strategistBody?: string
+  strategistEvidence?: string
+  strategistInstruction?: string
+  strategistExample?: string
   exampleReferences: string[]
   maxPoints: number
   weightedPoints: number
@@ -470,17 +476,35 @@ export function CroScoreOptimization() {
                     </div>
                   </div>
                   <div className="cro-quickwins-grid">
-                    {result.primary.quickWins.slice(0, 6).map((item) => (
+                    {result.primary.quickWins.slice(0, 5).map((item) => (
                       <article key={item.id} className="cro-quickwin-card">
                         <div className="cro-quickwin-topline">
                           <span className={`risk-pill risk-${item.state === 'missing' ? 'high' : 'medium'}`}>
                             {stateLabel(item.state)}
                           </span>
-                          <span>{item.impact} impact • {item.effort} effort</span>
+                          <span>Quick win {item.quickWinRank ?? '-'}</span>
                         </div>
-                        <h4>{item.actionItem}</h4>
-                        <p>{item.rationale}</p>
-                        <small>{item.recommendation}</small>
+                        <h4>{item.strategistHeading || item.actionItem}</h4>
+                        <p>{item.strategistBody || item.rationale}</p>
+                        {item.strategistEvidence ? (
+                          <div className="cro-quickwin-detail-block">
+                            <strong>What we saw</strong>
+                            <p>{item.strategistEvidence}</p>
+                          </div>
+                        ) : null}
+                        {item.strategistInstruction ? (
+                          <div className="cro-quickwin-detail-block">
+                            <strong>What to change</strong>
+                            <p>{item.strategistInstruction}</p>
+                          </div>
+                        ) : null}
+                        {item.strategistExample ? (
+                          <div className="cro-quickwin-detail-block cro-quickwin-example">
+                            <strong>Example implementation</strong>
+                            <p>{item.strategistExample}</p>
+                          </div>
+                        ) : null}
+                        <small>{item.impact} impact · {item.effort} effort</small>
                       </article>
                     ))}
                   </div>
@@ -708,3 +732,4 @@ export function CroScoreOptimization() {
     </section>
   )
 }
+

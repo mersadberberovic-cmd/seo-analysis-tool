@@ -1,4 +1,4 @@
-import fs from 'node:fs'
+﻿import fs from 'node:fs'
 import * as cheerio from 'cheerio'
 import * as XLSX from 'xlsx'
 import { chromium } from 'playwright-core'
@@ -255,7 +255,7 @@ async function analyzeCroPage({ url, checklist, includeScreenshot, checklistMode
     },
     metrics: buildCroMetrics(snapshot, signals, checklistResults),
     categoryScores: buildCategoryScores(checklistResults),
-    quickWins: buildCroQuickWins(checklistResults),
+    quickWins: buildCroQuickWins(checklistResults, snapshot, signals),
     strengths: buildCroStrengths(checklistResults),
     checklistResults,
     featureSnapshot: buildFeatureSnapshot(signals),
@@ -528,7 +528,7 @@ function deriveCroSignals(snapshot) {
   const numericClaims = countRegex(text, /\b\d+(?:[.,]\d+)?(?:%|x)?\b/g)
   const benefitHeadings = snapshot.headings.filter((item) => /(save|reduce|increase|faster|better|grow|book|close|win|convert|clarity|organize|track|improve|see)/i.test(item.text)).length
   const featureHeadings = snapshot.headings.filter((item) => /(automation|workflow|dashboard|analytics|reporting|integration|feature|module|platform)/i.test(item.text)).length
-  const testimonialMentions = countRegex(text, /(testimonial|customer story|case study|“|”|review|results? in|roi|stars?|trusted by)/gi)
+  const testimonialMentions = countRegex(text, /(testimonial|customer story|case study|â€œ|â€|review|results? in|roi|stars?|trusted by)/gi)
   const hasFaq = /faq|frequently asked questions/i.test(text) || countRegex(text, /\?/g) >= 4
   const hasKeyTakeaways = /key takeaways|what you.ll learn|in this article/i.test(text)
   const hasToc = /table of contents|jump to|on this page/i.test(text)
@@ -541,7 +541,7 @@ function deriveCroSignals(snapshot) {
   const reviewPlatformMentions = countRegex(text, /(g2|capterra|trustpilot|gartner|forrester|product hunt)/gi)
   const starRatingVisible = /\b[1-5](?:\.\d)?\s*(stars?|\/5|rating)\b/i.test(text)
   const hasGuarantee = /(money-back|free trial|cancel anytime|no credit card|guarantee|risk-free)/i.test(text)
-  const hasPricingToggle = /(monthly|annual|yearly|save \d|save \$|save £|save €)/i.test(text)
+  const hasPricingToggle = /(monthly|annual|yearly|save \d|save \$|save Â£|save â‚¬)/i.test(text)
   const hasPricingMatrix = snapshot.tables > 0 || snapshot.rendered.tables.length > 0 || /compare plans|feature matrix|all features/i.test(text)
   const pricingCardCount = countRegex(text, /(starter|pro|business|enterprise|most popular|recommended)/gi)
   const hasCalculator = /(calculator|estimate|custom price|roi calculator)/i.test(text)
@@ -835,12 +835,290 @@ function buildCategoryScores(checklistResults) {
     .sort((left, right) => right.max - left.max)
 }
 
-function buildCroQuickWins(checklistResults) {
-  return checklistResults
+function buildCroQuickWins(checklistResults, snapshot, signals) {
+  const rankedItems = checklistResults
     .filter((item) => item.applicable && item.detectorMode === 'automated' && item.state !== 'found')
-    .map((item) => ({ ...item, opportunityScore: item.priorityWeight + (item.state === 'missing' ? 4 : 1) }))
+    .map((item) => ({
+      ...item,
+      opportunityScore: item.priorityWeight + (item.state === 'missing' ? 4 : 1) + getQuickWinPriorityBoost(item, snapshot, signals),
+    }))
     .sort((left, right) => right.opportunityScore - left.opportunityScore)
-    .slice(0, 10)
+
+  const uniqueItems = []
+  const seenHeadings = new Set()
+
+  for (const item of rankedItems) {
+    const strategistHeading = buildQuickWinHeading(item, snapshot, signals)
+    if (seenHeadings.has(strategistHeading)) continue
+    seenHeadings.add(strategistHeading)
+    const strategistDetail = buildQuickWinDetail(item, snapshot, signals)
+    uniqueItems.push({
+      ...item,
+      strategistHeading,
+      strategistBody: strategistDetail.summary,
+      strategistEvidence: strategistDetail.evidence,
+      strategistInstruction: strategistDetail.instruction,
+      strategistExample: strategistDetail.example,
+    })
+    if (uniqueItems.length >= 5) break
+  }
+
+  return uniqueItems.map((item, index) => ({
+    ...item,
+    quickWinRank: index + 1,
+  }))
+}
+
+function getQuickWinPriorityBoost(item, snapshot, signals) {
+  let boost = 0
+
+  if (snapshot.pageType === 'service') {
+    if (/Micro-Copy Below Every CTA Button/i.test(item.actionItem)) boost += 8
+    if (/Star Rating Next to CTA|G2 or Capterra Badges|Live Review Widget|Social Proof Near CTA/i.test(item.actionItem)) boost += 7
+    if (/Pain Point Section Before the Solution|Pain-Agitate-Solution|Pain-First Copy Structure/i.test(item.actionItem)) boost += 7
+    if (/Full Feature Comparison Matrix|Feature Tier Comparison Table|Comparison Tables in Roundup Posts/i.test(item.actionItem)) boost += 7
+    if (/Money-Back Guarantee|Free Trial Terms/i.test(item.actionItem)) boost += 7
+    if (/Benefits Over Features in All Copy/i.test(item.actionItem)) boost += 5
+    if (/Short Form with 5 Fields Maximum|Short Form with 3 to 5 Fields/i.test(item.actionItem)) boost -= 4
+    if (/Message Match Between Ad and Landing Page/i.test(item.actionItem)) boost -= 3
+  }
+
+  if (signals.primaryCtas.length > 0 && /Micro-Copy Below Every CTA Button/i.test(item.actionItem)) boost += 2
+  if (Math.max(signals.testimonialMentions, signals.reviewPlatformMentions) <= 4 && /Star Rating Next to CTA|Social Proof Near CTA/i.test(item.actionItem)) boost += 2
+  if (!signals.hasGuarantee && /Money-Back Guarantee|Free Trial Terms/i.test(item.actionItem)) boost += 2
+  if (!signals.hasPainFirst && /Pain Point Section Before the Solution|Pain-Agitate-Solution|Pain-First Copy Structure/i.test(item.actionItem)) boost += 2
+  if (!signals.hasPricingMatrix && /Full Feature Comparison Matrix|Feature Tier Comparison Table|Comparison Tables in Roundup Posts/i.test(item.actionItem)) boost += 2
+
+  return boost
+}
+
+function buildQuickWinHeading(item, snapshot, signals) {
+  if (/Micro-Copy Below Every CTA Button/i.test(item.actionItem)) {
+    return `Add reassurance text under your "${getPrimaryCtaLabel(signals)}" buttons`
+  }
+  if (/Star Rating Next to CTA|G2 or Capterra Badges|Live Review Widget/i.test(item.actionItem)) {
+    return 'Add a star rating next to your main call-to-action'
+  }
+  if (/Pain Point Section Before the Solution|Pain-Agitate-Solution|Pain-First Copy Structure/i.test(item.actionItem)) {
+    return 'Lead with the buyer problem before the offer'
+  }
+  if (/Full Feature Comparison Matrix|Feature Tier Comparison Table|Comparison Tables in Roundup Posts/i.test(item.actionItem)) {
+    return 'Add a comparison table that makes the offer easy to compare'
+  }
+  if (/Money-Back Guarantee|Free Trial Terms/i.test(item.actionItem)) {
+    return 'Add a visible guarantee or risk-reversal near the CTA'
+  }
+  if (/Social Proof Near CTA|Customer Logos and Trust Badges/i.test(item.actionItem)) {
+    return 'Bring trust signals closer to the conversion point'
+  }
+  if (/Benefits Over Features in All Copy/i.test(item.actionItem)) {
+    return 'Rewrite the opening copy to emphasize outcomes, not just the offer'
+  }
+  if (/Short Form with 5 Fields Maximum|Short Form with 3 to 5 Fields/i.test(item.actionItem)) {
+    return 'Shorten the quote request flow'
+  }
+  if (/Message Match Between Ad and Landing Page/i.test(item.actionItem)) {
+    return 'Tighten the headline so it matches the buyer intent better'
+  }
+
+  return item.actionItem
+}
+
+function buildQuickWinDetail(item, snapshot, signals) {
+  const ctaLabel = getPrimaryCtaLabel(signals)
+  const trustSignalCount = Math.max(signals.testimonialMentions, signals.reviewPlatformMentions)
+  const heading = signals.firstHeading || snapshot.title || 'this page'
+  const serviceContext = inferServiceContext(snapshot)
+  const openingSnippet = getOpeningSignalSnippet(snapshot, signals)
+  const trustSignalSummary = buildTrustSignalExamples(signals)
+
+  if (/Micro-Copy Below Every CTA Button/i.test(item.actionItem)) {
+    return {
+      summary: `The "${ctaLabel}" buttons are doing the conversion work on their own right now, without supporting reassurance copy.`,
+      evidence: `We detected the CTA "${ctaLabel}" but no supporting micro-copy directly tied to it.`,
+      instruction: 'Add a short reassurance line directly underneath the main CTA in smaller muted text. Keep it practical and trust-building rather than promotional.',
+      example: `Example: "Free quote · No obligation · ${serviceContext.installerTrustLine}"`,
+    }
+  }
+
+  if (/Star Rating Next to CTA|G2 or Capterra Badges|Live Review Widget/i.test(item.actionItem)) {
+    return {
+      summary: `The scan only detected ${trustSignalCount} strong social-proof signal${trustSignalCount === 1 ? '' : 's'} on this page, which is light for a page asking someone to take action.`,
+      evidence: trustSignalSummary,
+      instruction: 'Put a visible rating or review-count proof line beside the main CTA so credibility shows up right at the decision point.',
+      example: 'Example: "4.9/5 · 200+ reviews" or "Rated 4.9/5 by local customers"',
+    }
+  }
+
+  if (/Pain Point Section Before the Solution|Pain-Agitate-Solution|Pain-First Copy Structure/i.test(item.actionItem)) {
+    return {
+      summary: 'The page moves quickly into the offer without first naming the buyer problem that likely brought the visitor here.',
+      evidence: `Opening copy detected: "${openingSnippet}"`,
+      instruction: `Before the promotional section, add one or two lines that acknowledge the buyer's situation, then bridge into the offer. For "${heading}", the problem framing should come before the sales message.`,
+      example: `Example: "${serviceContext.problemLine}"`,
+    }
+  }
+
+  if (/Full Feature Comparison Matrix|Feature Tier Comparison Table|Comparison Tables in Roundup Posts/i.test(item.actionItem)) {
+    return {
+      summary: 'There is no strong comparison structure on the page right now, so users have to work out the differences themselves.',
+      evidence: 'The scan did not detect a visible comparison table or matrix on the page.',
+      instruction: 'Add a simple comparison table showing the most decision-driving attributes side by side so visitors can evaluate options without extra mental effort.',
+      example: 'Suggested columns: model / room size / install included / warranty / running cost / best-for use case',
+    }
+  }
+
+  if (/Money-Back Guarantee|Free Trial Terms/i.test(item.actionItem)) {
+    return {
+      summary: 'There is no clear risk-reversal or workmanship reassurance close to the conversion point.',
+      evidence: 'The scan detected no visible guarantee or risk-reversal statement near the main CTA.',
+      instruction: 'Add a plain-language guarantee statement near the main conversion action so people know what happens if the installation or decision goes wrong.',
+      example: 'Example: "We back every installation with our 12-month workmanship guarantee — if something is not right, we will fix it."',
+    }
+  }
+
+  if (/Social Proof Near CTA|Customer Logos and Trust Badges/i.test(item.actionItem)) {
+    return {
+      summary: 'The page would feel more convincing if trust signals sat closer to the CTA instead of being spread through the page.',
+      evidence: trustSignalSummary,
+      instruction: 'Pull the strongest trust signals into a compact proof strip beside or just below the main CTA so reassurance lands at the point of decision.',
+      example: `Example proof strip: "${serviceContext.proofStrip}"`,
+    }
+  }
+
+  if (/Benefits Over Features in All Copy/i.test(item.actionItem)) {
+    return {
+      summary: 'The page currently leans more on the offer and service category than on the buyer outcome.',
+      evidence: `Headline/context detected: "${heading}"`,
+      instruction: 'Rewrite the opening copy so it spells out the real-world result the customer gets, not just the category of service being sold.',
+      example: `Example angle: "${serviceContext.outcomeLine}"`,
+    }
+  }
+
+  if (/Short Form with 5 Fields Maximum|Short Form with 3 to 5 Fields/i.test(item.actionItem)) {
+    return {
+      summary: 'The quote journey looks heavier than it needs to be for a high-intent service page.',
+      evidence: signals.topForm ? `Top visible form appears to ask for ${signals.topForm.fieldCount} fields.` : 'No short high-intent form was detected above the fold.',
+      instruction: 'Keep the first conversion step short and gather deeper qualification later so more visitors start the quote process.',
+      example: 'Start with: name / phone / suburb / property type / preferred installation timing',
+    }
+  }
+
+  if (/Message Match Between Ad and Landing Page/i.test(item.actionItem)) {
+    return {
+      summary: 'The page could do a better job of matching the exact commercial intent a searcher likely had when landing here.',
+      evidence: `Current title/headline framing: "${heading}"`,
+      instruction: 'Tighten the headline and supporting copy so they directly reflect the search reason — installation, pricing, trust, or offer value.',
+      example: `Example approach: "${serviceContext.intentMatchLine}"`,
+    }
+  }
+
+  return {
+    summary: item.rationale,
+    evidence: 'This recommendation comes from the checklist detector for this page type and the live page scan.',
+    instruction: item.recommendation,
+    example: item.exampleReferences[0] ? `Reference pattern: ${item.exampleReferences[0]}` : '',
+  }
+}
+
+function getPrimaryCtaLabel(signals) {
+  return signals.primaryCtas[0]?.text || signals.ctas[0]?.text || 'main CTA'
+}
+
+function describePageContext(snapshot, signals) {
+  if (snapshot.pageType === 'service') return 'a service page'
+  if (snapshot.pageType === 'pricing') return 'a pricing page'
+  if (snapshot.pageType === 'landing') return 'a landing page'
+  if (snapshot.pageType === 'demo') return 'a demo page'
+  if (signals.hasUrgency || signals.hasGuarantee) return 'a decision-stage page'
+  return 'this page'
+}
+
+function inferServiceContext(snapshot) {
+  const title = snapshot.title || ''
+  const body = snapshot.bodyText.toLowerCase()
+  const isHeatPump = /heat pump/.test(`${title} ${body}`)
+  const locationMatch = title.match(/\bin ([A-Z][a-zA-Z\s'-]+)/)
+  const location = locationMatch?.[1]?.trim() || 'your area'
+
+  if (isHeatPump) {
+    return {
+      installerTrustLine: 'NZ-certified installers',
+      problemLine: `${location} winters are expensive and uncomfortable when the heating setup is wrong. Show that problem first, then explain how this installation offer cuts running costs and improves comfort.`,
+      outcomeLine: `A warmer home, lower running costs, and more confidence choosing an installer in ${location}.`,
+      proofStrip: '50+ years in business · 12,000+ systems installed · Fully licensed team',
+      intentMatchLine: `Heat pump installation in ${location} with trusted local installers, clearer value, and a stronger reason to request a quote now.`,
+    }
+  }
+
+  return {
+    installerTrustLine: 'trusted local team',
+    problemLine: 'Start with the real buyer problem, then bridge into the service offer.',
+    outcomeLine: 'A clearer outcome, lower friction, and stronger trust at the point of decision.',
+    proofStrip: 'Years in business · review rating · strong local proof',
+    intentMatchLine: 'Make the headline match the exact commercial reason the user searched.',
+  }
+}
+
+function buildTrustSignalExamples(signals) {
+  const parts = []
+  if (signals.testimonialMentions > 0) parts.push(`${signals.testimonialMentions} testimonial/review mentions`)
+  if (signals.reviewPlatformMentions > 0) parts.push(`${signals.reviewPlatformMentions} review-platform mentions`)
+  if (signals.usageStatCount > 0) parts.push(`${signals.usageStatCount} usage/proof stats`)
+  if (signals.starRatingVisible) parts.push('a visible star/rating mention')
+  return parts.length > 0 ? `Detected trust-proof signals: ${parts.join(', ')}.` : 'Very little visible trust proof was detected near the conversion path.'
+}
+
+function getOpeningSignalSnippet(snapshot, signals) {
+  const heading = String(signals.firstHeading || '').trim()
+  const rendered = String(snapshot.rendered?.visibleText || '')
+  const rawBody = String(snapshot.bodyText || '')
+  const topBanner = String(snapshot.rendered?.topBannerText || '')
+  const navLabelPattern = (signals.navLabels || [])
+    .filter(Boolean)
+    .map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')
+
+  const sanitize = (value) => {
+    let cleaned = String(value || '')
+      .replace(/\s+/g, ' ')
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\b(gtm|googletagmanager|iframe|fbpx|display:none|visibility:hidden|skip to content|cart|menu)\b/gi, '')
+      .trim()
+
+    if (topBanner) {
+      cleaned = cleaned.replace(topBanner, '')
+    }
+
+    if (navLabelPattern) {
+      cleaned = cleaned.replace(new RegExp(`\\b(?:${navLabelPattern})\\b`, 'gi'), '')
+    }
+
+    if (heading) {
+      cleaned = cleaned.replace(heading, '')
+    }
+
+    return cleaned
+      .replace(/\s{2,}/g, ' ')
+      .replace(/^[|:;,\-–—\s]+/, '')
+      .trim()
+  }
+
+  const extractAfterHeading = (value) => {
+    if (!heading || !value) return ''
+    const index = value.toLowerCase().indexOf(heading.toLowerCase())
+    if (index < 0) return ''
+    return value.slice(index + heading.length)
+  }
+
+  const renderedClean = sanitize(extractAfterHeading(rendered) || rendered)
+  const bodyClean = sanitize(extractAfterHeading(rawBody) || rawBody)
+  const candidates = [renderedClean, bodyClean].filter(Boolean)
+  const best = candidates.find((item) => item.split(/\s+/).length >= 10) || candidates[0] || heading || 'Opening copy was not extracted cleanly from the page.'
+
+  const sentenceMatch = best.match(/(.{40,260}?[.!?])(?:\s|$)/)
+  return (sentenceMatch?.[1] || best.slice(0, 240)).trim()
 }
 
 function buildCroStrengths(checklistResults) {
@@ -1264,7 +1542,7 @@ function pricingHighlightDetector(_snapshot, signals) {
   return evaluateState({
     found: /most popular|recommended|best value/i.test(`${signals.headingTexts} ${signals.firstHeading}`),
     partial: signals.pricingCardCount >= 2,
-    foundReason: 'Pricing-card highlight text such as “most popular” or “recommended” was detected.',
+    foundReason: 'Pricing-card highlight text such as â€œmost popularâ€ or â€œrecommendedâ€ was detected.',
     partialReason: 'Pricing plans appear present, but the recommended plan is not clearly highlighted.',
     missingReason: 'No pricing-card highlight was detected.',
     recommendation: 'Highlight the recommended pricing tier visually to reduce choice friction.',
@@ -1341,7 +1619,7 @@ function planDescriptorDetector(_snapshot, signals) {
   return evaluateState({
     found: signals.hasPlanDescriptors,
     partial: signals.pricingCardCount >= 2,
-    foundReason: 'Plan descriptors such as “best for” were detected on the page.',
+    foundReason: 'Plan descriptors such as â€œbest forâ€ were detected on the page.',
     partialReason: 'Pricing plans appear present, but descriptors are not clearly visible.',
     missingReason: 'No plan-descriptor language was detected.',
     recommendation: 'Describe who each plan is for so buyers can self-select more quickly.',
@@ -1473,7 +1751,7 @@ function keyTakeawaysDetector(_snapshot, signals) {
   return evaluateState({
     found: signals.hasKeyTakeaways,
     partial: false,
-    foundReason: 'A key-takeaways or “what you’ll learn” style box was detected.',
+    foundReason: 'A key-takeaways or â€œwhat youâ€™ll learnâ€ style box was detected.',
     partialReason: '',
     missingReason: 'No key-takeaways box was detected near the top of the content.',
     recommendation: 'Add a short takeaways box near the top so readers know what value to expect.',
@@ -1664,7 +1942,7 @@ function mediaMentionsDetector(_snapshot, signals) {
     partial: false,
     foundReason: 'Media mention language was detected on the page.',
     partialReason: '',
-    missingReason: 'No media mention bar or “as seen in” signal was detected.',
+    missingReason: 'No media mention bar or â€œas seen inâ€ signal was detected.',
     recommendation: 'Add earned media mentions or authority logos where relevant and truthful.',
   })
 }
@@ -1689,7 +1967,7 @@ function outcomeCtaDetector(_snapshot, signals) {
     foundReason: `Outcome-oriented CTA copy was detected: "${outcomeCta?.text ?? ''}".`,
     partialReason: 'CTAs exist, but the copy is more generic than outcome-oriented.',
     missingReason: 'No strong outcome-oriented CTA copy was detected.',
-    recommendation: 'Use CTA labels that describe the result or next step, not generic words like “Submit”.',
+    recommendation: 'Use CTA labels that describe the result or next step, not generic words like â€œSubmitâ€.',
   })
 }
 
@@ -1756,9 +2034,9 @@ function intentAlignmentDetector(snapshot, signals) {
   return evaluateState({
     found: aligned,
     partial: signals.primaryCtas.length >= 1,
-    foundReason: 'The page structure and CTA style appear reasonably aligned with the page’s buying stage.',
+    foundReason: 'The page structure and CTA style appear reasonably aligned with the pageâ€™s buying stage.',
     partialReason: 'There are some alignment signals, but the page could match buyer intent more tightly.',
-    missingReason: 'The page’s CTA and page type do not strongly reinforce the likely visitor intent.',
+    missingReason: 'The pageâ€™s CTA and page type do not strongly reinforce the likely visitor intent.',
     recommendation: 'Align the CTA, offer, and proof with the buyer intent stage the page is meant to serve.',
   })
 }
@@ -1780,10 +2058,10 @@ function secondPersonDetector(_snapshot, signals) {
   return evaluateState({
     found: signals.secondPersonCount >= 8,
     partial: signals.secondPersonCount >= 3,
-    foundReason: 'The page uses “you/your” language enough to feel reader-oriented.',
+    foundReason: 'The page uses â€œyou/yourâ€ language enough to feel reader-oriented.',
     partialReason: 'The page uses some second-person language, but it still feels more brand-centric than buyer-centric.',
     missingReason: 'Very little second-person language was detected.',
-    recommendation: 'Write directly to the buyer using “you” and “your team” where it fits naturally.',
+    recommendation: 'Write directly to the buyer using â€œyouâ€ and â€œyour teamâ€ where it fits naturally.',
   })
 }
 
@@ -1836,9 +2114,12 @@ function comparisonQueryDetector(snapshot) {
   return evaluateState({
     found: /\bvs\b|compare|best /.test(combined),
     partial: false,
-    foundReason: 'The page appears to be a comparison-style or “best” style page.',
+    foundReason: 'The page appears to be a comparison-style or â€œbestâ€ style page.',
     partialReason: '',
     missingReason: 'No comparison-query style page signal was detected.',
-    recommendation: 'Create dedicated comparison or “vs” pages where those buyer-intent queries matter.',
+    recommendation: 'Create dedicated comparison or â€œvsâ€ pages where those buyer-intent queries matter.',
   })
 }
+
+
+
