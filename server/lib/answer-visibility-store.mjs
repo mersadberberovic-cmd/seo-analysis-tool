@@ -158,10 +158,46 @@ function initializeSchema(db) {
       details_json TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS google_connections (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL UNIQUE,
+      google_account_id TEXT,
+      email TEXT,
+      display_name TEXT,
+      picture_url TEXT,
+      scope_json TEXT NOT NULL,
+      access_token TEXT,
+      refresh_token TEXT,
+      token_expiry_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS google_oauth_states (
+      id TEXT PRIMARY KEY,
+      state TEXT NOT NULL UNIQUE,
+      redirect_to TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS google_property_selections (
+      id TEXT PRIMARY KEY,
+      connection_id TEXT NOT NULL UNIQUE,
+      ga4_property_id TEXT,
+      ga4_property_name TEXT,
+      gsc_site_url TEXT,
+      gsc_site_name TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (connection_id) REFERENCES google_connections(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_runs_campaign_checked ON runs(campaign_id, checked_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_prompt_checked ON runs(prompt_id, checked_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_status_requested ON run_jobs(status, requested_at ASC);
     CREATE INDEX IF NOT EXISTS idx_mentions_run_brand ON brand_mentions(run_id, brand_id);
+    CREATE INDEX IF NOT EXISTS idx_google_oauth_states_state ON google_oauth_states(state);
   `)
 }
 
@@ -553,6 +589,175 @@ export function getProviderHealthRecords() {
     model: row.model,
     details: parseJsonObject(row.details_json),
   }))
+}
+
+export function createGoogleOauthStateRecord({ redirectTo = '', createdAt, expiresAt }) {
+  const db = ensureDatabase()
+  const id = createAnswerVisibilityId('google_state')
+  const state = randomUUID()
+  db.prepare('INSERT INTO google_oauth_states (id, state, redirect_to, created_at, expires_at) VALUES (?, ?, ?, ?, ?)').run(
+    id,
+    state,
+    redirectTo,
+    createdAt,
+    expiresAt,
+  )
+  return { id, state, redirectTo, createdAt, expiresAt }
+}
+
+export function consumeGoogleOauthStateRecord(state) {
+  const db = ensureDatabase()
+  const row = db.prepare('SELECT * FROM google_oauth_states WHERE state = ?').get(state)
+  if (!row) return null
+  db.prepare('DELETE FROM google_oauth_states WHERE state = ?').run(state)
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    return null
+  }
+  return {
+    id: row.id,
+    state: row.state,
+    redirectTo: row.redirect_to,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+  }
+}
+
+export function upsertGoogleConnectionRecord({
+  provider = 'google',
+  googleAccountId = null,
+  email = null,
+  displayName = null,
+  pictureUrl = null,
+  scope = [],
+  accessToken = null,
+  refreshToken = null,
+  tokenExpiryAt = null,
+  now,
+}) {
+  const db = ensureDatabase()
+  const existing = db.prepare('SELECT * FROM google_connections WHERE provider = ?').get(provider)
+
+  if (existing) {
+    db.prepare(`
+      UPDATE google_connections
+      SET google_account_id = ?, email = ?, display_name = ?, picture_url = ?, scope_json = ?, access_token = ?, refresh_token = ?, token_expiry_at = ?, updated_at = ?
+      WHERE provider = ?
+    `).run(
+      googleAccountId ?? existing.google_account_id,
+      email ?? existing.email,
+      displayName ?? existing.display_name,
+      pictureUrl ?? existing.picture_url,
+      JSON.stringify(scope ?? parseJsonArray(existing.scope_json)),
+      accessToken ?? existing.access_token,
+      refreshToken ?? existing.refresh_token,
+      tokenExpiryAt ?? existing.token_expiry_at,
+      now,
+      provider,
+    )
+    return getGoogleConnectionRecord(provider)
+  }
+
+  const id = createAnswerVisibilityId('google_connection')
+  db.prepare(`
+    INSERT INTO google_connections (
+      id, provider, google_account_id, email, display_name, picture_url, scope_json,
+      access_token, refresh_token, token_expiry_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    provider,
+    googleAccountId,
+    email,
+    displayName,
+    pictureUrl,
+    JSON.stringify(scope ?? []),
+    accessToken,
+    refreshToken,
+    tokenExpiryAt,
+    now,
+    now,
+  )
+  return getGoogleConnectionRecord(provider)
+}
+
+export function getGoogleConnectionRecord(provider = 'google') {
+  const db = ensureDatabase()
+  const row = db.prepare('SELECT * FROM google_connections WHERE provider = ?').get(provider)
+  if (!row) return null
+  return {
+    id: row.id,
+    provider: row.provider,
+    googleAccountId: row.google_account_id,
+    email: row.email,
+    displayName: row.display_name,
+    pictureUrl: row.picture_url,
+    scope: parseJsonArray(row.scope_json),
+    accessToken: row.access_token,
+    refreshToken: row.refresh_token,
+    tokenExpiryAt: row.token_expiry_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+export function saveGooglePropertySelectionRecord({
+  connectionId,
+  ga4PropertyId = null,
+  ga4PropertyName = null,
+  gscSiteUrl = null,
+  gscSiteName = null,
+  now,
+}) {
+  const db = ensureDatabase()
+  const existing = db.prepare('SELECT * FROM google_property_selections WHERE connection_id = ?').get(connectionId)
+
+  if (existing) {
+    db.prepare(`
+      UPDATE google_property_selections
+      SET ga4_property_id = ?, ga4_property_name = ?, gsc_site_url = ?, gsc_site_name = ?, updated_at = ?
+      WHERE connection_id = ?
+    `).run(
+      ga4PropertyId,
+      ga4PropertyName,
+      gscSiteUrl,
+      gscSiteName,
+      now,
+      connectionId,
+    )
+  } else {
+    db.prepare(`
+      INSERT INTO google_property_selections (
+        id, connection_id, ga4_property_id, ga4_property_name, gsc_site_url, gsc_site_name, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      createAnswerVisibilityId('google_selection'),
+      connectionId,
+      ga4PropertyId,
+      ga4PropertyName,
+      gscSiteUrl,
+      gscSiteName,
+      now,
+      now,
+    )
+  }
+
+  return getGooglePropertySelectionRecord(connectionId)
+}
+
+export function getGooglePropertySelectionRecord(connectionId) {
+  const db = ensureDatabase()
+  const row = db.prepare('SELECT * FROM google_property_selections WHERE connection_id = ?').get(connectionId)
+  if (!row) return null
+  return {
+    id: row.id,
+    connectionId: row.connection_id,
+    ga4PropertyId: row.ga4_property_id,
+    ga4PropertyName: row.ga4_property_name,
+    gscSiteUrl: row.gsc_site_url,
+    gscSiteName: row.gsc_site_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
 }
 
 export function getAnswerVisibilityStoreSnapshot() {

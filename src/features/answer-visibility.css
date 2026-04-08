@@ -470,6 +470,91 @@
   color: #6f2817;
 }
 
+.answer-google-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.answer-google-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.answer-google-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.compact-setting-card {
+  min-width: 180px;
+}
+
+.answer-ai-traffic-panel {
+  margin-bottom: 20px;
+}
+
+.answer-traffic-table {
+  display: grid;
+  gap: 10px;
+}
+
+.answer-traffic-table-head,
+.answer-traffic-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) 100px 120px 110px 130px;
+  gap: 14px;
+  align-items: center;
+}
+
+.answer-traffic-table-head {
+  color: #567164;
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.answer-traffic-table-row {
+  border: 1px solid #dce8e1;
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #f8fcfa;
+}
+
+.answer-traffic-table-row strong {
+  color: #173527;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.answer-connection-prompts {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.answer-connection-prompt {
+  border: 1px solid #dce8e1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #f8fcfa;
+  display: grid;
+  gap: 6px;
+}
+
+.answer-connection-prompt strong {
+  color: #173527;
+  line-height: 1.45;
+}
+
+.answer-connection-prompt small {
+  color: #587264;
+  line-height: 1.5;
+}
+
 .answer-visibility-results-grid {
   grid-template-columns: minmax(0, 1fr) 360px;
   align-items: start;
@@ -485,7 +570,8 @@
 @media (max-width: 1180px) {
   .answer-visibility-results-grid,
   .answer-visibility-entry-grid,
-  .answer-health-grid {
+  .answer-health-grid,
+  .answer-google-grid {
     grid-template-columns: 1fr;
   }
 
@@ -510,5 +596,10 @@
 
   .answer-platform-meta {
     justify-content: flex-start;
+  }
+
+  .answer-traffic-table-head,
+  .answer-traffic-table-row {
+    grid-template-columns: 1fr;
   }
 }

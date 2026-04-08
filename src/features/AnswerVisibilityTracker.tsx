@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+﻿import { useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import './answer-visibility.css'
 
@@ -94,6 +94,136 @@ type ProviderHealthRecord = {
 type ProviderHealthResponse = {
   checkedAt: string
   providers: ProviderHealthRecord[]
+}
+
+type GooglePropertySelection = {
+  id: string
+  connectionId: string
+  ga4PropertyId: string | null
+  ga4PropertyName: string | null
+  gscSiteUrl: string | null
+  gscSiteName: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+type GooglePropertyOption = {
+  id?: string
+  property?: string
+  displayName: string
+  propertyType?: string
+  account?: string
+  accountDisplayName?: string
+  siteUrl?: string
+  permissionLevel?: string
+}
+
+type GoogleIntegrationStatus = {
+  configured: boolean
+  connected: boolean
+  needsReconnect?: boolean
+  account: {
+    email: string | null
+    displayName: string | null
+    pictureUrl: string | null
+  } | null
+  selection: GooglePropertySelection | null
+  redirectUri: string
+  message: string
+  ga4Properties: GooglePropertyOption[]
+  gscProperties: GooglePropertyOption[]
+}
+
+type AiTrafficSource = {
+  id: string
+  label: string
+  sessions: number
+  totalUsers: number
+  engagedSessions: number
+  share: number
+  topSourceMedium: string
+}
+
+type AiTrafficLandingPage = {
+  landingPage: string
+  sessions: number
+  totalUsers: number
+  engagedSessions: number
+  topSource: string | null
+  sourceMix?: Array<{ label: string; sessions: number }>
+  gscClicks: number | null
+  gscImpressions: number | null
+  gscCtr: number | null
+  gscPosition: number | null
+}
+
+type AiTrafficOverview = {
+  property: {
+    ga4PropertyId: string | null
+    ga4PropertyName: string | null
+    gscSiteUrl: string | null
+    gscSiteName: string | null
+  }
+  dateRange: {
+    days: number
+    startDate: string
+    endDate: string
+  }
+  summary: {
+    aiSessions: number
+    aiUsers: number
+    engagedSessions: number
+    sourceCount: number
+    topSource: string | null
+    score: number
+    grade: string
+    scoreLabel: string
+    scoreComponents: Array<{
+      label: string
+      points: number
+      maxPoints: number
+      detail: string
+    }>
+  }
+  sources: AiTrafficSource[]
+  sourceTrends: Array<AiTrafficSource & {
+    previousSessions: number
+    sessionDelta: number
+    previousShare: number
+    shareDelta: number
+  }>
+  dailyTrend: Array<{
+    date: string
+    totalSessions: number
+    bySource: Record<string, number>
+  }>
+  landingPages: AiTrafficLandingPage[]
+  comparison: {
+    aiSessionsDelta: number
+    aiUsersDelta: number
+    engagedSessionsDelta: number
+    scoreDelta: number
+    previousScore: number
+    previousGrade: string
+    previousTopSource: string | null
+  }
+  comparisonRange: {
+    startDate: string
+    endDate: string
+  }
+  promptTrafficConnections: Array<{
+    landingPage: string
+    sessions: number
+    topSource: string | null
+      matchedPrompts: Array<{
+        prompt: string
+        checkedAt: string
+        primaryBrandMentioned: boolean
+        firstMentionedBrand: string | null
+        score: number
+        matchedQueries?: string[]
+      }>
+    }>
 }
 
 type FilterState = {
@@ -199,6 +329,17 @@ function formatDate(value: string) {
   } catch {
     return value
   }
+}
+
+function formatDelta(value: number) {
+  if (value === 0) return '0'
+  return `${value > 0 ? '+' : ''}${value}`
+}
+
+function formatSignedPercent(value: number) {
+  const percent = Math.round(value * 100)
+  if (percent === 0) return '0%'
+  return `${percent > 0 ? '+' : ''}${percent}%`
 }
 
 function downloadTextFile(fileName: string, contents: string) {
@@ -351,6 +492,14 @@ export function AnswerVisibilityTracker() {
   const [records, setRecords] = useState<VisibilityRecord[]>([])
   const [summary, setSummary] = useState<SummaryMetric | null>(null)
   const [providerHealth, setProviderHealth] = useState<ProviderHealthRecord[]>([])
+  const [googleStatus, setGoogleStatus] = useState<GoogleIntegrationStatus | null>(null)
+  const [googleGa4PropertyId, setGoogleGa4PropertyId] = useState('')
+  const [googleGscSiteUrl, setGoogleGscSiteUrl] = useState('')
+  const [googleTrafficDays, setGoogleTrafficDays] = useState(28)
+  const [googleTraffic, setGoogleTraffic] = useState<AiTrafficOverview | null>(null)
+  const [isLoadingGoogle, setIsLoadingGoogle] = useState(false)
+  const [isSavingGoogleSelection, setIsSavingGoogleSelection] = useState(false)
+  const [isLoadingGoogleTraffic, setIsLoadingGoogleTraffic] = useState(false)
   const [job, setJob] = useState<VisibilityJob | null>(null)
   const [filters, setFilters] = useState<FilterState>({
     jobId: '',
@@ -515,9 +664,62 @@ export function AnswerVisibilityTracker() {
     setSummary(data.summary)
   }
 
+  const loadGoogleStatus = async () => {
+    setIsLoadingGoogle(true)
+    try {
+      const data = await readJson<GoogleIntegrationStatus>('/api/google/status')
+      setGoogleStatus(data)
+      setGoogleGa4PropertyId(data.selection?.ga4PropertyId ?? '')
+      setGoogleGscSiteUrl(data.selection?.gscSiteUrl ?? '')
+    } finally {
+      setIsLoadingGoogle(false)
+    }
+  }
+
+  const loadGoogleTraffic = async (days = googleTrafficDays) => {
+    setIsLoadingGoogleTraffic(true)
+    try {
+      const data = await readJson<AiTrafficOverview>(`/api/google/ai-traffic?days=${days}`)
+      setGoogleTraffic(data)
+    } catch (trafficError) {
+      setGoogleTraffic(null)
+      throw trafficError
+    } finally {
+      setIsLoadingGoogleTraffic(false)
+    }
+  }
+
   useEffect(() => {
     void loadRecords()
+    void loadGoogleStatus()
   }, [])
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin && event.origin !== 'http://localhost:4174') {
+        return
+      }
+
+      if (event.data?.type === 'google-oauth-success') {
+        void (async () => {
+          await loadGoogleStatus()
+          try {
+            await loadGoogleTraffic()
+          } catch {
+            // Ignore until property selection is saved.
+          }
+        })()
+      }
+    }
+
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [googleTrafficDays])
+
+  useEffect(() => {
+    if (!googleStatus?.selection?.ga4PropertyId) return
+    void loadGoogleTraffic()
+  }, [googleStatus?.selection?.ga4PropertyId, googleTrafficDays])
 
   useEffect(() => {
     void loadProviderHealth()
@@ -555,6 +757,41 @@ export function AnswerVisibilityTracker() {
 
     if (data.job.status === 'failed' && data.job.errorMessage) {
       setError(data.job.errorMessage)
+    }
+  }
+
+  const handleGoogleConnect = () => {
+    window.open('/api/google/oauth/start', 'google-oauth', 'width=560,height=760')
+  }
+
+  const handleGoogleSelectionSave = async () => {
+    setError('')
+    setIsSavingGoogleSelection(true)
+
+    try {
+      await readJson<{ selection: GooglePropertySelection }>('/api/google/properties/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ga4PropertyId: googleGa4PropertyId,
+          gscSiteUrl: googleGscSiteUrl,
+        }),
+      })
+      await loadGoogleStatus()
+      await loadGoogleTraffic()
+    } catch (selectionError) {
+      setError(selectionError instanceof Error ? selectionError.message : 'Could not save Google property selection.')
+    } finally {
+      setIsSavingGoogleSelection(false)
+    }
+  }
+
+  const handleLoadAiTraffic = async () => {
+    setError('')
+    try {
+      await loadGoogleTraffic()
+    } catch (trafficError) {
+      setError(trafficError instanceof Error ? trafficError.message : 'Could not load AI traffic.')
     }
   }
 
@@ -731,10 +968,72 @@ export function AnswerVisibilityTracker() {
                 <h4>{getProviderStatusLabel(provider, activeProviders.length > 0)}</h4>
               </div>
               <p>{getProviderHelperCopy(provider, activeProviders.length > 0)}</p>
-              <small>{provider.model ? `${provider.model}${provider.latencyMs ? ` • ${provider.latencyMs}ms` : ''}` : 'No model configured'}</small>
+              <small>{provider.model ? `${provider.model}${provider.latencyMs ? ` â€¢ ${provider.latencyMs}ms` : ''}` : 'No model configured'}</small>
             </article>
           ))}
         </div>
+
+        <section className="panel answer-google-panel">
+          <div className="subsection-heading">
+            <div>
+              <p className="panel-kicker">Google data</p>
+              <h3>Connect GA4 and Search Console</h3>
+            </div>
+          </div>
+
+          <div className="answer-google-grid">
+            <article className="metric-card metric-card-compact">
+              <span>Google account</span>
+              <strong>
+                {googleStatus?.connected
+                  ? (googleStatus.account?.email || googleStatus.account?.displayName || 'Connected')
+                  : 'Not connected'}
+              </strong>
+              <small>{googleStatus?.message || 'Sign in with a Google account to choose GA4 and GSC properties.'}</small>
+            </article>
+            <article className="metric-card metric-card-compact">
+              <span>GA4 property</span>
+              <strong>{googleStatus?.selection?.ga4PropertyName || 'Not selected'}</strong>
+              <small>{googleStatus?.selection?.ga4PropertyId || 'Choose the GA4 property for AI referral traffic.'}</small>
+            </article>
+            <article className="metric-card metric-card-compact">
+              <span>GSC property</span>
+              <strong>{googleStatus?.selection?.gscSiteName || 'Not selected'}</strong>
+              <small>{googleStatus?.selection?.gscSiteUrl || 'Choose the Search Console property to enrich landing-page context.'}</small>
+            </article>
+          </div>
+
+          <div className="answer-google-actions">
+            <button type="button" onClick={handleGoogleConnect} className="secondary-button">
+              {googleStatus?.connected ? 'Reconnect Google account' : 'Connect Google account'}
+            </button>
+            <label className="setting-card">
+              <span>GA4 property</span>
+              <select value={googleGa4PropertyId} onChange={(event) => setGoogleGa4PropertyId(event.target.value)} disabled={!googleStatus?.connected || isLoadingGoogle}>
+                <option value="">Choose a GA4 property</option>
+                {(googleStatus?.ga4Properties || []).map((property) => (
+                  <option key={property.id} value={property.id}>
+                    {property.displayName}{property.accountDisplayName ? ` - ${property.accountDisplayName}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="setting-card">
+              <span>GSC property</span>
+              <select value={googleGscSiteUrl} onChange={(event) => setGoogleGscSiteUrl(event.target.value)} disabled={!googleStatus?.connected || isLoadingGoogle}>
+                <option value="">Choose a Search Console property</option>
+                {(googleStatus?.gscProperties || []).map((property) => (
+                  <option key={property.siteUrl} value={property.siteUrl}>
+                    {property.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={() => void handleGoogleSelectionSave()} className="secondary-button" disabled={!googleStatus?.connected || isSavingGoogleSelection}>
+              {isSavingGoogleSelection ? 'Saving...' : 'Save properties'}
+            </button>
+          </div>
+        </section>
 
         <div className="answer-visibility-entry-grid">
           <label className="setting-card">
@@ -836,6 +1135,275 @@ export function AnswerVisibilityTracker() {
                 <h3>Visibility snapshot</h3>
               </div>
             </div>
+
+            <section className="panel preview-panel dashboard-module-panel answer-ai-traffic-panel">
+                  <div className="subsection-heading">
+                    <div>
+                      <p className="panel-kicker">AI referral traffic</p>
+                      <h3>GA4 and GSC snapshot</h3>
+                    </div>
+                    <div className="answer-google-actions">
+                      <label className="setting-card compact-setting-card">
+                        <span>Date range</span>
+                        <select value={String(googleTrafficDays)} onChange={(event) => setGoogleTrafficDays(Number(event.target.value))}>
+                          <option value="28">Last 28 days</option>
+                          <option value="60">Last 60 days</option>
+                          <option value="90">Last 90 days</option>
+                        </select>
+                      </label>
+                      <button type="button" className="secondary-button" onClick={() => void handleLoadAiTraffic()} disabled={isLoadingGoogleTraffic || !googleStatus?.selection?.ga4PropertyId}>
+                        {isLoadingGoogleTraffic ? 'Loading AI traffic...' : 'Refresh AI traffic'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {googleTraffic ? (
+                    <>
+                      <div className="metric-grid metric-grid-compact">
+                        <article className="metric-card metric-card-compact">
+                          <span>AI traffic grade</span>
+                          <strong>{googleTraffic.summary.grade}</strong>
+                          <small>{googleTraffic.summary.score}/100 - {googleTraffic.summary.scoreLabel}</small>
+                        </article>
+                        <article className="metric-card metric-card-compact">
+                          <span>AI sessions</span>
+                          <strong>{googleTraffic.summary.aiSessions}</strong>
+                          <small>{googleTraffic.dateRange.startDate} to {googleTraffic.dateRange.endDate}</small>
+                        </article>
+                        <article className="metric-card metric-card-compact">
+                          <span>AI users</span>
+                          <strong>{googleTraffic.summary.aiUsers}</strong>
+                          <small>Filtered by session source / medium</small>
+                        </article>
+                        <article className="metric-card metric-card-compact">
+                          <span>Engaged sessions</span>
+                          <strong>{googleTraffic.summary.engagedSessions}</strong>
+                          <small>GA4 engaged sessions from AI sources</small>
+                        </article>
+                        <article className="metric-card metric-card-compact">
+                          <span>Top AI source</span>
+                          <strong>{googleTraffic.summary.topSource || '-'}</strong>
+                          <small>{googleTraffic.property.ga4PropertyName || 'No GA4 property selected'}</small>
+                        </article>
+                      </div>
+
+                      <div className="dashboard-module-grid">
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Scoring</p>
+                              <h3>AI traffic quality rubric</h3>
+                            </div>
+                          </div>
+                          <div className="findings-list compact-findings">
+                            {googleTraffic.summary.scoreComponents.map((component) => (
+                              <article key={component.label} className="finding-card severity-low">
+                                <div className="finding-topline">
+                                  <span>{component.maxPoints > 0 ? `${component.points}/${component.maxPoints}` : `${component.points}`}</span>
+                                  <h4>{component.label}</h4>
+                                </div>
+                                <p>{component.detail}</p>
+                              </article>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Comparison</p>
+                              <h3>Previous period comparison</h3>
+                            </div>
+                          </div>
+                          <div className="score-chart">
+                            <div className="score-bar-row">
+                              <div className="score-bar-meta">
+                                <strong>AI sessions</strong>
+                                <span>{formatDelta(googleTraffic.comparison.aiSessionsDelta)} vs previous {googleTraffic.dateRange.days} days</span>
+                              </div>
+                              <div className="score-bar-track">
+                                <div className={`score-bar-fill ${googleTraffic.comparison.aiSessionsDelta < 0 ? 'score-bar-fill-warn' : ''}`} style={{ width: `${Math.min(100, Math.max(8, Math.abs(googleTraffic.comparison.aiSessionsDelta) * 2))}%` }} />
+                              </div>
+                            </div>
+                            <div className="score-bar-row">
+                              <div className="score-bar-meta">
+                                <strong>AI users</strong>
+                                <span>{formatDelta(googleTraffic.comparison.aiUsersDelta)}</span>
+                              </div>
+                              <div className="score-bar-track">
+                                <div className={`score-bar-fill ${googleTraffic.comparison.aiUsersDelta < 0 ? 'score-bar-fill-warn' : ''}`} style={{ width: `${Math.min(100, Math.max(8, Math.abs(googleTraffic.comparison.aiUsersDelta) * 2))}%` }} />
+                              </div>
+                            </div>
+                            <div className="score-bar-row">
+                              <div className="score-bar-meta">
+                                <strong>Traffic score</strong>
+                                <span>{formatDelta(googleTraffic.comparison.scoreDelta)} - was {googleTraffic.comparison.previousGrade} ({googleTraffic.comparison.previousScore}/100)</span>
+                              </div>
+                              <div className="score-bar-track">
+                                <div className={`score-bar-fill ${googleTraffic.comparison.scoreDelta < 0 ? 'score-bar-fill-warn' : ''}`} style={{ width: `${Math.min(100, Math.max(8, Math.abs(googleTraffic.comparison.scoreDelta) * 4))}%` }} />
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Trend</p>
+                              <h3>Daily AI traffic trend</h3>
+                            </div>
+                          </div>
+                          <div className="trend-list">
+                            {googleTraffic.dailyTrend.length > 0 ? (
+                              <article className="trend-card">
+                                <strong>Total AI sessions by day</strong>
+                                <div className="trend-points">
+                                  {googleTraffic.dailyTrend.slice(-14).map((point) => (
+                                    <div key={point.date} className="trend-point">
+                                      <div className="trend-point-bar" style={{ height: `${Math.max(10, Math.min(100, point.totalSessions * 6))}%` }} />
+                                      <span>{point.totalSessions}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                <small>{googleTraffic.dailyTrend.slice(-14).map((point) => point.date.slice(5)).join(' · ')}</small>
+                              </article>
+                            ) : (
+                              <div className="empty-state"><p>No daily AI traffic points available yet.</p></div>
+                            )}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Trend</p>
+                              <h3>Source-specific movement</h3>
+                            </div>
+                          </div>
+                          <div className="trend-list">
+                            {googleTraffic.sourceTrends.map((source) => (
+                              <article key={source.id} className="trend-card">
+                                <strong>{source.label}</strong>
+                                <div className="brand-rank-stats">
+                                  <span>{source.sessions} sessions now</span>
+                                  <span>{formatDelta(source.sessionDelta)} vs previous</span>
+                                  <span>{formatSignedPercent(source.shareDelta)} share change</span>
+                                </div>
+                                <div className="trend-points">
+                                  <div className="trend-point">
+                                    <div className="trend-point-bar" style={{ height: `${Math.max(10, Math.min(100, source.previousSessions * 4))}%` }} />
+                                    <span>{source.previousSessions}</span>
+                                  </div>
+                                  <div className="trend-point">
+                                    <div className="trend-point-bar" style={{ height: `${Math.max(10, Math.min(100, source.sessions * 4))}%` }} />
+                                    <span>{source.sessions}</span>
+                                  </div>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Sources</p>
+                              <h3>AI referral source mix</h3>
+                            </div>
+                          </div>
+                          <div className="score-chart">
+                            {googleTraffic.sources.map((source) => (
+                              <div key={source.id} className="score-bar-row">
+                                <div className="score-bar-meta">
+                                  <strong>{source.label}</strong>
+                                  <span>{source.sessions} sessions - {formatPercent(source.share)}</span>
+                                </div>
+                                <div className="score-bar-track">
+                                  <div className="score-bar-fill" style={{ width: `${Math.max(6, source.share * 100)}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel dashboard-module-wide">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Landing pages</p>
+                              <h3>Pages getting AI referral traffic</h3>
+                            </div>
+                          </div>
+                          <div className="answer-traffic-table">
+                            <div className="answer-traffic-table-head">
+                              <span>Landing page</span>
+                              <span>Sessions</span>
+                              <span>Top source</span>
+                              <span>GSC clicks</span>
+                              <span>GSC impressions</span>
+                            </div>
+                            {googleTraffic.landingPages.map((page) => (
+                              <div key={page.landingPage} className="answer-traffic-table-row">
+                                <strong>{page.landingPage}</strong>
+                                <span>{page.sessions}</span>
+                                <span>{page.topSource || '-'}</span>
+                                <span>{page.gscClicks ?? '-'}</span>
+                                <span>{page.gscImpressions ?? '-'}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </article>
+
+                        <article className="panel preview-panel dashboard-module-panel dashboard-module-wide">
+                          <div className="subsection-heading">
+                            <div>
+                              <p className="panel-kicker">Merged view</p>
+                              <h3>Prompt visibility vs AI traffic</h3>
+                            </div>
+                          </div>
+                          {googleTraffic.promptTrafficConnections.length > 0 ? (
+                            <div className="findings-list compact-findings">
+                              {googleTraffic.promptTrafficConnections.map((connection) => (
+                                <article key={connection.landingPage} className="finding-card severity-low">
+                                  <div className="finding-topline">
+                                    <span>{connection.topSource || 'AI source'}</span>
+                                    <h4>{connection.landingPage}</h4>
+                                  </div>
+                                  <p>{connection.sessions} AI sessions reached this page in the selected period.</p>
+                                  <div className="answer-connection-prompts">
+                                    {connection.matchedPrompts.map((prompt) => (
+                                      <div key={`${connection.landingPage}-${prompt.prompt}`} className="answer-connection-prompt">
+                                        <strong>{prompt.prompt}</strong>
+                                        <small>
+                                          Match score {prompt.score} - {prompt.primaryBrandMentioned ? 'Primary brand mentioned' : 'Primary brand absent'}
+                                          {prompt.firstMentionedBrand ? ` - First brand: ${prompt.firstMentionedBrand}` : ''}
+                                        </small>
+                                        {prompt.matchedQueries && prompt.matchedQueries.length > 0 ? (
+                                          <small>Matched GSC queries: {prompt.matchedQueries.join(', ')}</small>
+                                        ) : null}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="empty-state">
+                              <p>Run more prompt checks and collect more AI landing-page traffic to build prompt-to-page connections here.</p>
+                            </div>
+                          )}
+                        </article>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-state">
+                      <p>
+                        {googleStatus?.selection?.ga4PropertyId
+                          ? 'Load AI traffic to see GA4 referral data from ChatGPT, Gemini, Claude, Perplexity, and similar sources.'
+                          : 'Connect Google and choose a GA4 property to pull AI referral traffic into the visibility tracker.'}
+                      </p>
+                    </div>
+                  )}
+            </section>
 
             {summary ? (
               <>
@@ -950,7 +1518,7 @@ export function AnswerVisibilityTracker() {
                         <div key={item.brandId} className="score-bar-row">
                           <div className="score-bar-meta">
                             <strong>{item.name}</strong>
-                            <span>{formatPercent(item.share)} • {item.averageMentions.toFixed(1)} avg mentions</span>
+                            <span>{formatPercent(item.share)} â€¢ {item.averageMentions.toFixed(1)} avg mentions</span>
                           </div>
                           <div className="score-bar-track">
                             <div className="score-bar-fill" style={{ width: `${Math.max(4, item.share * 100)}%` }} />
@@ -1050,7 +1618,7 @@ export function AnswerVisibilityTracker() {
                       <h4>{record.prompt}</h4>
                     </div>
                     <div className="prompt-result-meta">
-                      <span className={`prompt-grade-badge prompt-grade-${record.visibilityGrade.toLowerCase()}`}>{record.visibilityGrade} • {record.visibilityScore}/100</span>
+                      <span className={`prompt-grade-badge prompt-grade-${record.visibilityGrade.toLowerCase()}`}>{record.visibilityGrade} â€¢ {record.visibilityScore}/100</span>
                       <span className={`prompt-outcome-badge prompt-outcome-${record.outcomeLabel.toLowerCase().replace(/\s+/g, '-')}`}>{record.outcomeLabel}</span>
                       <span>{formatDate(record.checkedAt)}</span>
                       <span>{record.projectTag || record.campaignName}</span>
@@ -1288,3 +1856,6 @@ export function AnswerVisibilityTracker() {
     </section>
   )
 }
+
+
+

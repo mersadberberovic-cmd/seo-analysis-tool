@@ -13,6 +13,13 @@ import {
   startAnswerVisibilityWorker,
 } from './lib/answer-visibility-service.mjs'
 import { scanCroExperience } from './lib/cro-score-service.mjs'
+import {
+  createGoogleOauthStartUrl,
+  getAiTrafficOverview,
+  getGoogleIntegrationOverview,
+  handleGoogleOauthCallback,
+  saveGooglePropertySelection,
+} from './lib/google-traffic-service.mjs'
 
 const app = express()
 const port = 4174
@@ -101,6 +108,80 @@ app.get('/api/providers/health', async (request, response) => {
   response.json(await getProviderHealthStatus({
     forceRefresh: String(request.query.refresh ?? '') === 'true',
   }))
+})
+
+app.get('/api/google/status', async (_request, response) => {
+  response.json(await getGoogleIntegrationOverview())
+})
+
+app.get('/api/google/oauth/start', (request, response) => {
+  try {
+    const authUrl = createGoogleOauthStartUrl({
+      redirectTo: String(request.query.redirectTo ?? ''),
+    })
+    response.redirect(authUrl)
+  } catch (error) {
+    response.status(500).send(`
+      <html><body style="font-family: sans-serif; padding: 24px;">
+        <h1>Google connection unavailable</h1>
+        <p>${escapeHtml(error instanceof Error ? error.message : 'Google OAuth could not be started.')}</p>
+      </body></html>
+    `)
+  }
+})
+
+app.get('/api/google/oauth/callback', async (request, response) => {
+  const code = String(request.query.code ?? '')
+  const state = String(request.query.state ?? '')
+  const error = String(request.query.error ?? '')
+
+  if (error) {
+    response.status(400).send(renderOauthCallbackHtml({
+      success: false,
+      message: `Google sign-in failed: ${error}`,
+    }))
+    return
+  }
+
+  try {
+    const result = await handleGoogleOauthCallback({ code, state })
+    response.send(renderOauthCallbackHtml({
+      success: true,
+      message: result.connection?.email
+        ? `Connected ${result.connection.email}. You can close this window and choose GA4 and GSC properties in the tool.`
+        : 'Google account connected. You can close this window.',
+    }))
+  } catch (callbackError) {
+    response.status(500).send(renderOauthCallbackHtml({
+      success: false,
+      message: callbackError instanceof Error ? callbackError.message : 'Google sign-in could not be completed.',
+    }))
+  }
+})
+
+app.post('/api/google/properties/select', async (request, response) => {
+  try {
+    const selection = await saveGooglePropertySelection({
+      ga4PropertyId: String(request.body?.ga4PropertyId ?? '').trim(),
+      gscSiteUrl: String(request.body?.gscSiteUrl ?? '').trim(),
+    })
+    response.json({ selection })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Could not save Google property selection.',
+    })
+  }
+})
+
+app.get('/api/google/ai-traffic', async (request, response) => {
+  try {
+    const days = Number(request.query.days ?? 28)
+    response.json(await getAiTrafficOverview({ days }))
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Could not load AI traffic from GA4/GSC.',
+    })
+  }
 })
 
 app.get('/api/answer-visibility/campaigns', (_request, response) => {
@@ -314,6 +395,36 @@ server.on('close', () => {
 })
 
 process.stdin.resume()
+
+function renderOauthCallbackHtml({ success, message }) {
+  const status = success ? 'success' : 'error'
+  return `
+    <html>
+      <body style="font-family: Inter, Arial, sans-serif; background: #f5faf7; color: #173327; padding: 32px;">
+        <div style="max-width: 560px; margin: 0 auto; background: white; border: 1px solid #dbe8df; border-radius: 18px; padding: 24px; box-shadow: 0 12px 28px rgba(0,0,0,0.08);">
+          <p style="margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: #208a58;">Google connection</p>
+          <h1 style="margin: 0 0 12px; font-size: 28px;">${success ? 'Connected' : 'Connection failed'}</h1>
+          <p style="margin: 0 0 16px; font-size: 16px; line-height: 1.6;">${escapeHtml(message)}</p>
+          <p style="margin: 0; color: #5d7065;">You can close this window and return to the SEO Opportunity Finder.</p>
+        </div>
+        <script>
+          if (window.opener) {
+            window.opener.postMessage({ type: 'google-oauth-${status}' }, 'http://localhost:5173');
+          }
+          setTimeout(() => window.close(), 1200);
+        </script>
+      </body>
+    </html>
+  `
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
 
 function analyzeKeywordFit(input) {
   const keywordTerms = normalizeTokens(input.keyword)
