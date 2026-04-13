@@ -13,6 +13,7 @@ import {
   startAnswerVisibilityWorker,
 } from './lib/answer-visibility-service.mjs'
 import { scanCroExperience } from './lib/cro-score-service.mjs'
+import { clearClarityIntegration, getClarityIntegrationStatus, saveClarityIntegration } from './lib/clarity-service.mjs'
 import {
   createGoogleOauthStartUrl,
   getAiTrafficOverview,
@@ -182,6 +183,29 @@ app.get('/api/google/ai-traffic', async (request, response) => {
       error: error instanceof Error ? error.message : 'Could not load AI traffic from GA4/GSC.',
     })
   }
+})
+
+app.get('/api/clarity/status', async (_request, response) => {
+  response.json(await getClarityIntegrationStatus())
+})
+
+app.post('/api/clarity/connect', async (request, response) => {
+  try {
+    const connection = await saveClarityIntegration({
+      apiToken: String(request.body?.apiToken ?? ''),
+      projectLabel: String(request.body?.projectLabel ?? ''),
+    })
+    response.json({ connection: { projectLabel: connection.projectLabel, source: connection.source, lastValidatedAt: connection.lastValidatedAt } })
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : 'Could not save Clarity connection.',
+    })
+  }
+})
+
+app.delete('/api/clarity/connect', async (_request, response) => {
+  await clearClarityIntegration()
+  response.json({ ok: true })
 })
 
 app.get('/api/answer-visibility/campaigns', (_request, response) => {
@@ -1117,7 +1141,7 @@ function detectContentEffort(page, visualSummary) {
     earned += 3
     findings.push(`Found process or methodology wording: "${hasMethodSnippet}"`)
   } else {
-    gaps.push('No strong “show your work” or methodology language was detected in the page copy.')
+    gaps.push('No strong â€œshow your workâ€ or methodology language was detected in the page copy.')
   }
 
   if (visualSummary.meaningfulImageCount > 0 || visualSummary.videoCount > 0) {

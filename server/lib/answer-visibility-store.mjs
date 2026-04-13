@@ -193,6 +193,18 @@ function initializeSchema(db) {
       FOREIGN KEY (connection_id) REFERENCES google_connections(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS clarity_connections (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL UNIQUE,
+      project_label TEXT,
+      api_token TEXT,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_validated_at TEXT,
+      last_error TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_runs_campaign_checked ON runs(campaign_id, checked_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_prompt_checked ON runs(prompt_id, checked_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_status_requested ON run_jobs(status, requested_at ASC);
@@ -758,6 +770,75 @@ export function getGooglePropertySelectionRecord(connectionId) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
+}
+
+export function upsertClarityConnectionRecord({
+  provider = 'clarity',
+  projectLabel = null,
+  apiToken = null,
+  source = 'saved',
+  lastValidatedAt = null,
+  lastError = null,
+  now,
+}) {
+  const db = ensureDatabase()
+  const existing = db.prepare('SELECT * FROM clarity_connections WHERE provider = ?').get(provider)
+
+  if (existing) {
+    db.prepare(`
+      UPDATE clarity_connections
+      SET project_label = ?, api_token = ?, source = ?, updated_at = ?, last_validated_at = ?, last_error = ?
+      WHERE provider = ?
+    `).run(
+      projectLabel ?? existing.project_label,
+      apiToken ?? existing.api_token,
+      source ?? existing.source,
+      now,
+      lastValidatedAt ?? existing.last_validated_at,
+      lastError,
+      provider,
+    )
+  } else {
+    db.prepare(`
+      INSERT INTO clarity_connections (
+        id, provider, project_label, api_token, source, created_at, updated_at, last_validated_at, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      createAnswerVisibilityId('clarity_connection'),
+      provider,
+      projectLabel,
+      apiToken,
+      source,
+      now,
+      now,
+      lastValidatedAt,
+      lastError,
+    )
+  }
+
+  return getClarityConnectionRecord(provider)
+}
+
+export function getClarityConnectionRecord(provider = 'clarity') {
+  const db = ensureDatabase()
+  const row = db.prepare('SELECT * FROM clarity_connections WHERE provider = ?').get(provider)
+  if (!row) return null
+  return {
+    id: row.id,
+    provider: row.provider,
+    projectLabel: row.project_label,
+    apiToken: row.api_token,
+    source: row.source,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastValidatedAt: row.last_validated_at,
+    lastError: row.last_error,
+  }
+}
+
+export function deleteClarityConnectionRecord(provider = 'clarity') {
+  const db = ensureDatabase()
+  db.prepare('DELETE FROM clarity_connections WHERE provider = ?').run(provider)
 }
 
 export function getAnswerVisibilityStoreSnapshot() {
